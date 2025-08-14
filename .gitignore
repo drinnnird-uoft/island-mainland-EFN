@@ -1,0 +1,15 @@
+.Rproj.user
+.Rhistory
+.Ruserdata
+*.DS_Store
+temp_data/
+*.nb.html
+data/GABI-I.csv
+GABI_shapefiles/*
+data/GIFT_regions.dbf
+data/GIFT_regions.gpkg
+data/GIFT_regions.prj
+data/GIFT_regions.shp
+data/GIFT_regions.shx
+/data/konig/*
+*.bak

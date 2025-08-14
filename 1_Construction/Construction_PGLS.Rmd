@@ -1,0 +1,674 @@
+---
+title: "PGLS Construction"
+output: html_notebook
+---
+
+Notebook setup
+```{r setup, include=FALSE}
+# Set the working directory
+knitr::opts_knit$set(root.dir = "C:/Users/wande/Documents/EEB498_R/island_ldg")
+```
+
+Dependencies setup
+```{r}
+#devtools::install_github("jinyizju/V.PhyloMaker2")
+library(tidyverse)
+packageVersion("tidyverse") # ‘2.0.0’
+library(stringr)
+packageVersion("stringr") # ‘1.5.1’
+library(V.PhyloMaker)
+packageVersion("V.PhyloMaker2") # ‘0.1.0’
+library(nlme)
+packageVersion("nlme") # ‘3.1.166’
+library(ggplot2)
+packageVersion("ggplot2") # ‘3.5.1’
+library(patchwork)
+packageVersion("patchwork") # ‘1.3.0’
+```
+
+bring in EFN species data
+to construct data/efn_resolved_full.csv, run 1_Construction/EFNs_taxize.Rmd
+
+```{r}
+efndat <- read.csv("data/efn_resolved_full.csv", header = TRUE) %>% 
+  rename(species = matched_name) %>% 
+  mutate("species" = ifelse(is.na(species), Phy, species)) %>% 
+  select("EFN", "species") %>% 
+  distinct(species, .keep_all = TRUE)
+```
+
+bring in biotic pollination, mycorrhizae and nitrogen fixation trait data
+```{r}
+# bring in myc dat species (vascular plants only)
+mdat.sp <- read.csv("data/Funroot_species_08092021.csv", header = TRUE) %>%                     
+  rename(species = latin, myc.s = myc) %>%                                                     
+  mutate(species = str_replace(species, "_", " "))                                         
+
+# bring in myc dat genus (vascular plants only)
+mdat.g <- read.csv("data/Funroot_genus_08092021.csv", header = TRUE) %>%                       
+  rename(myc.g = myc)  
+
+ndat <- read.csv("data/Werner_NFix.csv", header = TRUE) %>%     
+  dplyr::select(c("species", "family", "data_fixing")) %>% 
+  mutate(species = str_replace(species, "_", " "))     
+
+# bring in poll dat species 
+pdat.s <- read.csv("data/gift_poll_disp_traits.csv", header = TRUE) %>%                     
+  rename(species = work_species, poll.s = trait_value_3.6.1) %>%   
+  select(species, poll.s) %>%
+  drop_na()
+
+pdat.f <- read.csv("data/gift_poll_disp_traits_tax.csv", header = TRUE) %>%
+  filter(trait_ID == "3.6.1") %>%
+  rename(poll.f = trait_value, family = taxon_name) %>%   
+  select(family, poll.f) %>%
+  drop_na() 
+```
+
+bring in GIFT data
+to construct GIFT data run 1_Construction/GIFT_Extraction.R
+using unrestricted data here
+
+```{r}
+load("data/GIFT_LatGrad_extended.RData")
+species.dat <- checklists
+geo.dat <- readRDS("data/geo.dat.extended_foranalyses.rds")
+```
+
+bring in species dat
+```{r}
+species.geo <- species.dat[[1]] %>% as.data.frame() %>%
+  select(c('entity_ID', 'entity_class')) %>%
+  mutate_at(c('entity_class'), as.character) %>%
+  mutate_at(c('entity_ID'), as.integer) 
+```
+
+bring in geo dat
+
+```{r}
+geo <- geo.dat %>% 
+  rename(GDP_satellite = "mean_GDP_satellite", CHELSA_annual_Prec = "mean_wc2.0_bio_30s_12", CHELSA_annual_mean_Temp = "mean_wc2.0_bio_30s_01", 
+         Popdensity = "mean_gpw-v4_popdensity_UN_2015", Human_Footprint = "mean_HFP2009_unproj", Human_Influence = "mean_hii_v2geo", 
+         elev_range = "range", age_Ma = "age_MA") %>%
+  select(c('entity_ID', 'geo_entity', 'area','longitude','latitude', 'biome','dist', 'CHELSA_annual_mean_Temp', 'CHELSA_annual_Prec',
+           'GDP_satellite', 'Popdensity', 'Human_Footprint', 'Human_Influence', 'elev_range', 'geology', 'age_Ma')) %>%
+  mutate_at(c('area','longitude','latitude', 'dist','CHELSA_annual_mean_Temp', 'CHELSA_annual_Prec',
+              'GDP_satellite', 'Popdensity','Human_Footprint', 'Human_Influence', 'elev_range', 'age_Ma'), as.numeric) %>%
+  mutate_at(c('geo_entity','biome','geology'), as.character) %>%
+  mutate_at(c('entity_ID'), as.integer) %>%
+  left_join(species.geo, by = "entity_ID") %>%
+  distinct(entity_ID, .keep_all = TRUE) %>%
+  mutate(entity_class = case_when(entity_class == "Island" ~ "Island",
+                                  entity_class == "Island Part" ~ "Island",          
+                                  entity_class == "Island Group" ~ "Island",
+                                  entity_class == "Mainland" ~ "Mainland",
+                                  entity_class == "Island/Mainland" ~ "undetermined")) %>%
+  mutate(geology = case_when(geology == "atoll" ~ "dev", 
+                             geology == "floor" ~ "dev", 
+                             geology == "floor/volcanic" ~ "dev",
+                             geology == "volcanic" ~ "dev",
+                             geology == "shelf" ~ "nondev",
+                             geology == "fragment" ~ "nondev",
+                             geology == "atoll/shelf/volcanic" ~ "nondev",
+                             geology == "fragment/shelf/volcanic" ~ "nondev")) %>% 
+  mutate(entity_class2 = case_when(geology == "dev" ~ "Oceanic",                      
+                                   geology == "nondev" ~ "Non-oceanic",
+                                   entity_class =="Mainland" ~ "Mainland"))
+```
+
+ with species checklist data, keep native, assign EFN using species, fill 0 if no info is available
+ join with geo data and keep unique sp by loc (entity_ID)
+ 
+```{r}
+species <- species.dat[[2]] %>% as.data.frame() %>% 
+  mutate(species = paste(genus, species_epithet, sep = " ")) %>% 
+  select(c("entity_ID", "family", "native", "naturalized", "species", "name_ID", "genus")) %>%
+  mutate_at(c('family', 'species', 'name_ID', 'genus'), as.character) %>%
+  mutate_at(c('native', 'naturalized'), as.numeric) %>%
+  mutate_at(c('entity_ID'), as.integer) %>%
+  filter(native == 1) %>%                                                                     
+  select(-c("native", "naturalized")) %>%
+  left_join(efndat, by = c("species")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN)) %>%    
+  drop_na(EFN) %>%
+  left_join(geo, by = "entity_ID") %>%                                          
+  ungroup()  %>% 
+  distinct(species, .keep_all = TRUE)
+```
+Get all species across all geo entities
+```{r}
+species.all <- species.dat[[2]] %>% as.data.frame() %>% 
+  mutate(species = paste(genus, species_epithet, sep = " ")) %>% 
+  select(c("entity_ID", "family", "native", "naturalized", "species", "name_ID", "genus")) %>%
+  mutate_at(c('family', 'species', 'name_ID', 'genus'), as.character) %>%
+  mutate_at(c('native', 'naturalized'), as.numeric) %>%
+  mutate_at(c('entity_ID'), as.integer) %>%
+  filter(native == 1) %>%                                                                     
+  select(-c("native", "naturalized")) %>%
+  left_join(geo, by = "entity_ID")
+```
+
+
+Find all species and flag whether they occur on islands
+```{r}
+species.islands <- species.all %>% 
+  ungroup() %>% 
+  filter(entity_class2 == "Oceanic") %>% 
+  dplyr::select(species) %>% 
+  mutate(on_islands = 'Y')
+```
+
+Flag mainland-only species
+```{r}
+species.all <- species.all %>% 
+  mutate(matched = species %in% species.islands$species) %>% 
+  mutate(on_islands = ifelse(matched, 'Y', 'N')) %>% 
+  dplyr::select(-matched)
+```
+Verify that there are species that occur on mainlands and islands
+```{r}
+coexist <- species.all %>% 
+  filter(entity_class == 'Mainland' & on_islands == 'Y') %>% 
+  group_by(entity_ID) %>% 
+  summarize(total = n())
+```
+flag endemics, colonists and mainland-only
+```{r}
+flagged <- species.all %>% 
+  group_by(species) %>% 
+  summarize(
+    on_island = any(entity_class2 == "Oceanic"),
+    on_mainland = any(entity_class == "Mainland")
+  ) %>% 
+  mutate(
+    label = case_when(
+      on_island & !on_mainland ~ "endemic",
+      !on_island & on_mainland ~ "mainland",
+      on_island & on_mainland ~ "colonist",
+      is.na(on_island) & on_mainland ~ "mainland",
+      is.na(on_island) & is.na(on_mainland) ~ "unknown"
+    )
+  )
+
+species.all <- species.all %>% 
+  left_join(flagged, by = c("species"))
+```
+
+
+calculate median latitude, longitude and island-only median latitude and longitude for each species
+```{r}
+species.medlatlong <- species.all %>% 
+  distinct(species, entity_ID, .keep_all = TRUE) %>% 
+  group_by(species) %>% 
+  mutate(mean_latitude = mean(abs(latitude), na.rm = TRUE), mean_longitude = mean(longitude, na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  select(species, mean_latitude, mean_longitude)
+
+species.islandlat <- species.all %>% 
+  filter(entity_class2 == "Oceanic") %>% 
+  distinct(species, entity_ID, .keep_all = TRUE) %>% 
+  group_by(species) %>% 
+  summarize(mean_latitude.i = mean(abs(latitude), na.rm = TRUE), .groups = "drop") %>% 
+  dplyr::select(species, mean_latitude.i)
+  
+```
+prep extra traits for left joins
+```{r}
+extra_traits <- readRDS("data/GIFT_extra_traits_extended.Rds") %>% 
+  select(work_species, trait_value_1.1.1, trait_value_2.1.1, trait_value_1.2.1, trait_value_1.2.2) %>% 
+  rename(woodiness = trait_value_1.1.1, 
+         lifecycle = trait_value_2.1.1,
+         growth_form_A = trait_value_1.2.1,
+         growth_form_B = trait_value_1.2.2) %>% 
+  drop_na()
+
+extra_traits_with_efn <- extra_traits %>% 
+  left_join(efndat, by = c("work_species" = "species"))
+```
+check correlations among new traits
+```{r}
+# Define the traits (exclude 'species')
+traits <- setdiff(names(extra_traits), "work_species")
+
+# Get all unique pairs of traits
+trait_pairs <- combn(traits, 2, simplify = FALSE)
+
+# For each trait pair, count distinct species at intersections
+results <- map(trait_pairs, function(pair) {
+  extra_traits %>%
+    group_by(.data[[pair[1]]], .data[[pair[2]]]) %>%
+    summarise(unique_species = n_distinct(work_species), .groups = "drop") %>%
+    rename(level1 = 1, level2 = 2) %>%
+    mutate(trait1 = pair[1], trait2 = pair[2])
+})
+
+# Combine into one tidy data frame
+pairwise_species_counts <- bind_rows(results)
+
+# woodiness vs. growth form A
+wg <- extra_traits %>%
+  group_by(woodiness, growth_form_A) %>%
+  summarise(unique_species = n_distinct(work_species), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = growth_form_A, values_from = unique_species, values_fill = 0)
+
+wgb <- extra_traits %>%
+  group_by(woodiness, growth_form_B) %>%
+  summarise(unique_species = n_distinct(work_species), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = growth_form_B, values_from = unique_species, values_fill = 0)
+
+wefn <- extra_traits_with_efn %>% 
+  group_by(EFN, woodiness) %>%
+  summarise(unique_species = n_distinct(work_species), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = woodiness, values_from = unique_species, values_fill = 0) 
+
+gfefn <- extra_traits_with_efn %>% 
+  group_by(EFN, growth_form_B) %>% 
+  summarise(unique_species = n_distinct(work_species), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = growth_form_B, values_from = unique_species, values_fill = 0) 
+```
+
+
+get unique species across all geo and add EFN traits
+```{r}
+species.unique <- species.all %>% 
+  distinct(species, .keep_all = TRUE) %>% 
+  left_join(efndat, by = c("species")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN)) %>%    
+  drop_na(EFN) %>%
+  left_join(extra_traits, by = c("species" = "work_species")) %>% 
+  drop_na(woodiness, lifecycle, growth_form_A, growth_form_B) %>% 
+  left_join(mdat.sp, by = c("species")) %>%                                    
+  left_join(mdat.g, by = c("genus"))  %>%                                     
+  mutate(myc = ifelse(is.na(myc.s), myc.g, myc.s)) %>%  
+  mutate(myc_level = ifelse(!is.na(myc.s), "species", "genus")) %>%
+  #drop_na(myc) %>%                                                          
+  mutate(myc = case_when(myc=="AM" ~ "AM",                                   
+                         myc=="AMNM" ~ "AM", # if plant is AMNM: some dependency on AM
+                         myc=="AMEM" ~ "AM", # same above.
+                         myc=="EM" ~ "EM",
+                         myc=="NM" ~ "NM",
+                         myc=="ORC" ~ "ORC")) %>%
+  mutate(myc = factor(myc)) %>% 
+  mutate(myc=fct_relevel(myc, c("NM", "AM", "EM", "ORC"))) %>% 
+  select(-c("myc.s", "myc.g")) %>% 
+  left_join(ndat, by = c("species","family")) %>%  
+  #drop_na(data_fixing) %>% 
+  rename(nfix = data_fixing) %>% 
+  left_join(pdat.s, by = c("species")) %>% 
+  left_join(pdat.f, by = c("family"))  %>%                                     
+  mutate(poll = ifelse(is.na(poll.s), poll.f, poll.s)) %>%    
+  mutate(poll_level = ifelse(!is.na(poll.s), "species", "family")) %>%
+  #drop_na(poll) %>%                                                          
+  select(-c("poll.s", "poll.f")) %>%  
+  left_join(species.medlatlong, by = c("species")) %>% 
+  distinct(species, .keep_all = TRUE) %>% 
+  dplyr::select(species, genus, family, EFN, on_islands, myc, poll, poll_level, nfix, woodiness, lifecycle, growth_form_A, growth_form_B, mean_latitude, mean_longitude, label)
+
+occurrences <- readRDS("data/species_export_GBIF_filtered.RDS")
+
+occurrences <- occurrences %>% 
+ dplyr::select(c("species", "occ_count"))
+
+species.efn <- species.all %>% 
+  distinct(species, .keep_all = TRUE) %>% 
+  left_join(efndat, by = c("species")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN)) %>%    
+  drop_na(EFN) %>%
+  left_join(occurrences, by = c("species")) %>% 
+  filter(occ_count >= 100)
+
+names(species.unique)
+
+endemics <- species.unique %>% 
+  filter(label=="endemic")
+
+endemics.myc <- endemics %>% 
+  group_by(myc) %>% 
+  drop_na(myc) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+endemics.nfix <- endemics %>% 
+  group_by(nfix) %>% 
+  drop_na(nfix) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+endemics.poll <- endemics %>% 
+  group_by(poll) %>% 
+  drop_na(poll) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+endemics.EFN <- endemics %>% 
+  group_by(EFN) %>% 
+  drop_na(EFN) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+endemics.woodiness <- endemics %>% 
+  group_by(woodiness) %>% 
+  drop_na(woodiness) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+endemics.lifecycle <- endemics %>% 
+  group_by(lifecycle) %>% 
+  drop_na(lifecycle) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+colonists <- species.unique %>% 
+  filter(label=="colonist")
+
+colonists.myc <- colonists %>% 
+  group_by(myc) %>% 
+  drop_na(myc) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+colonists.nfix <- colonists %>% 
+  group_by(nfix) %>% 
+  drop_na(nfix) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+colonists.poll <- colonists %>% 
+  group_by(poll) %>% 
+  drop_na(poll) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+colonists.EFN <- colonists %>% 
+  group_by(EFN) %>% 
+  drop_na(EFN) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+colonists.woodiness <- colonists %>% 
+  group_by(woodiness) %>% 
+  drop_na(woodiness) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+colonists.lifecycle <- colonists %>% 
+  group_by(lifecycle) %>% 
+  drop_na(lifecycle) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+mainland <- species.unique %>% 
+  filter(label=="mainland")
+
+mainland.myc <- mainland %>% 
+  group_by(myc) %>% 
+  drop_na(myc) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+mainland.nfix <- mainland %>% 
+  group_by(nfix) %>% 
+  drop_na(nfix) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+mainland.poll <- mainland %>% 
+  group_by(poll) %>% 
+  drop_na(poll) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+mainland.EFN <- mainland %>% 
+  group_by(EFN) %>% 
+  drop_na(EFN) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+mainland.woodiness <- mainland %>% 
+  group_by(woodiness) %>% 
+  drop_na(woodiness) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+mainland.lifecycle <- mainland %>% 
+  group_by(lifecycle) %>% 
+  drop_na(lifecycle) %>% 
+  summarize(total = n()) %>% 
+  mutate(proportion = total / sum(total, na.rm = TRUE))
+
+endemics.myc$group <- "Endemics"
+colonists.myc$group <- "Colonists"
+mainland.myc$group <- "Mainland"
+
+endemics.EFN$group <- "Endemics"
+colonists.EFN$group <- "Colonists"
+mainland.EFN$group <- "Mainland"
+
+endemics.lifecycle$group <- "Endemics"
+colonists.lifecycle$group <- "Colonists"
+mainland.lifecycle$group <- "Mainland"
+
+endemics.nfix$group <- "Endemics"
+colonists.nfix$group <- "Colonists"
+mainland.nfix$group <- "Mainland"
+
+endemics.poll$group <- "Endemics"
+colonists.poll$group <- "Colonists"
+mainland.poll$group <- "Mainland"
+
+endemics.woodiness$group <- "Endemics"
+colonists.woodiness$group <- "Colonists"
+mainland.woodiness$group <- "Mainland"
+
+trait.myc <- bind_rows(endemics.myc, colonists.myc, mainland.myc)
+trait.EFN <- bind_rows(endemics.EFN, colonists.EFN, mainland.EFN)
+trait.EFN <- trait.EFN %>% 
+  mutate(EFN = factor(EFN,
+                      levels = c(0, 1),
+                      labels = c("No", "Yes")))
+trait.lifecycle <- bind_rows(endemics.lifecycle, colonists.lifecycle, mainland.lifecycle)
+trait.nfix <- bind_rows(endemics.nfix, colonists.nfix, mainland.nfix)
+trait.poll <- bind_rows(endemics.poll, colonists.poll, mainland.poll)
+trait.woodiness <- bind_rows(endemics.woodiness, colonists.woodiness, mainland.woodiness)
+
+trait.myc$group <- factor(trait.myc$group, levels = c("Endemics", "Colonists", "Mainland"))
+trait.EFN$group <- factor(trait.EFN$group, levels = c("Endemics", "Colonists", "Mainland"))
+trait.lifecycle$group <- factor(trait.lifecycle$group, levels = c("Endemics", "Colonists", "Mainland"))
+trait.nfix$group <- factor(trait.nfix$group, levels = c("Endemics", "Colonists", "Mainland"))
+trait.poll$group <- factor(trait.poll$group, levels = c("Endemics", "Colonists", "Mainland"))
+trait.woodiness$group <- factor(trait.woodiness$group, levels = c("Endemics", "Colonists", "Mainland"))
+```
+Plot the proportions of traits for endemics, mainlanders and colonists
+```{r}
+plot.myc <- ggplot(trait.myc, aes(x = group, y = proportion, fill = myc)) +
+  geom_bar(stat = "identity") + 
+  labs(x = "", y = "Species (prop.)", fill = "Mycorrhizal type") + 
+  theme_minimal() +
+  scale_fill_viridis_d() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  theme(
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11)
+  )
+
+plot.EFN <- ggplot(trait.EFN, aes(x = group, y = proportion, fill = EFN)) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Species (prop.)", fill = "EFNs") +
+  theme_minimal()+
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  theme(
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11)
+  ) 
+
+plot.lifecycle <- ggplot(trait.lifecycle, aes(x = group, y = proportion, fill = lifecycle)) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Species (prop.)", fill = "Lifecycle") +
+  theme_minimal()+
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  theme(
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11)
+  )
+
+plot.nfix <- ggplot(trait.nfix, aes(x = group, y = proportion, fill = nfix)) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Species (prop.)", fill = "N-fixing symbionts") +
+  theme_minimal()+
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  theme(
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11)
+  )
+
+plot.poll <- ggplot(trait.poll, aes(x = group, y = proportion, fill = poll)) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Species (prop.)", fill = "Pollination type") +
+  theme_minimal()+
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  theme(
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11)
+  )
+
+plot.woodiness <- ggplot(trait.woodiness, aes(x = group, y = proportion, fill = woodiness)) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Species (prop.)", fill = "Woodiness") +
+  theme_minimal()+
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  theme(
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11)
+  )
+
+combined_plot <- (plot.EFN + plot.nfix + plot.myc + plot.poll + plot.lifecycle + plot.woodiness) + 
+  plot_layout(ncol = 3)
+
+ggsave("figures/species_level_traits_by_group.png", combined_plot, width = 10, height = 12, dpi = 600)
+```
+
+
+Check Lat/Long vs EFN
+```{r}
+ggplot(species.unique, aes(x=mean_latitude, y=EFN, colour=on_islands)) +
+  geom_jitter() +
+  labs(x = "mean absolute latitude", y = "EFN status") +
+  ggtitle("EFN status and latitude")
+
+ggplot(species.unique, aes(x=mean_longitude, y=EFN, colour=on_islands)) +
+  geom_jitter() +
+  labs(x = "mean longitude", y = "EFN status") +
+  ggtitle("EFN status and longitude")
+```
+
+Build PGLS models
+```{r}
+sp_phylo <- species.unique %>% 
+  dplyr::select(species, genus, family)
+
+# uncomment to run phylo maker
+#result.v2 <- phylo.maker(sp_phylo, scenarios=c("S1","S2","S3"))
+#saveRDS(result.v2, "data/phylov2.Rds")
+result.v2 <- readRDS("data/phylov2.Rds")
+
+sp.for.phylo <- species.unique %>% 
+  mutate(on_islands = case_when(on_islands == 'Y' ~ 1,
+                                on_islands == 'N' ~ 0))
+```
+
+build basic and pgls models
+```{r}
+model1 <- lm(on_islands~EFN+EFN*mean_latitude+EFN*mean_longitude+myc+nfix+poll+woodiness+lifecycle, data=sp.for.phylo)
+summary(model1)
+```
+make sure tips of phylo model matches names of species 
+drop records missing at least one trait 
+```{r}
+sp_clean <- sp.for.phylo %>% 
+  drop_na()
+
+sp_clean$species_fixed <- gsub(" ", "_", sp_clean$species)
+rownames(sp_clean) <- sp_clean$species_fixed
+
+common_species <- intersect(rownames(sp_clean), result.v2$scenario.1$tip.label)
+sp_clean <- sp_clean[common_species, ]
+saveRDS(sp_clean, "data/PGLS_sp_all_traits.RDS")
+tree_clean <- drop.tip(result.v2$scenario.1, setdiff(result.v2$scenario.1$tip.label, common_species))
+
+all(rownames(sp_clean) %in% tree_clean$tip.label)
+
+library(phylolm)
+
+# Model using maximum likelihood estimation of lambda:
+newsize <- 1500*1024^2
+options(future.globals.maxSize = newsize)
+
+glm_check <- glm(on_islands ~ EFN + myc + nfix + poll + woodiness + lifecycle,
+                 data = sp_clean,
+                 family = binomial)
+summary(glm_check)
+
+model <- phyloglm(on_islands ~ EFN + myc + nfix + poll + woodiness + lifecycle,
+                  data = sp_clean,
+                  phy = tree_clean,
+                  method = "logistic_MPLE",
+                  boot = 100,
+                  btol = 100)
+summary(model)
+```
+
+```{r}
+
+# just EFN data
+
+sp_clean_EFN <- sp.for.phylo
+
+sp_clean_EFN$species_fixed <- gsub(" ", "_", sp_clean_EFN$species)
+rownames(sp_clean_EFN) <- sp_clean_EFN$species_fixed
+
+common_species_EFN <- intersect(rownames(sp_clean_EFN), result.v2$scenario.1$tip.label)
+sp_clean_EFN <- sp_clean_EFN[common_species_EFN, ]
+tree_clean_EFN <- drop.tip(result.v2$scenario.1, setdiff(result.v2$scenario.1$tip.label, common_species_EFN))
+saveRDS(sp_clean_EFN, "data/PGLS_sp_EFN_woodiness_lifecycle.RDS")
+
+
+all(rownames(sp_clean_EFN) %in% tree_clean_EFN$tip.label)
+
+model2 <- phyloglm(on_islands ~ EFN + woodiness + lifecycle,
+                  data = sp_clean_EFN,
+                  phy = tree_clean_EFN,
+                  method = "logistic_MPLE",
+                  boot = 100)
+
+summary(model2)
+```
+
+```{r}
+ex <- env %>% 
+  filter(entity_ID == "10028")
+head(ex)
+```
+

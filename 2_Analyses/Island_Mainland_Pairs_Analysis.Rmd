@@ -1,0 +1,644 @@
+---
+title: "EFN plant and ant traits for island-mainland pairs"
+output: html_notebook
+---
+# Global: Analysis Type
+Set this to TRUE if you are requiring overlap between islands and mainland pools,
+FALSE otherwise
+```{r}
+BOOL_REQUIRE_OVERLAP <- TRUE
+```
+
+#Notebook setup
+```{r setup, include=FALSE}
+# Set the working directory
+knitr::opts_knit$set(root.dir = "C:/Users/wande/Documents/EEB498_R/island_ldg")
+```
+#Dependencies
+```{r}
+library(tidyverse)
+library(stringr)
+library(viridis)
+library(car)
+library(lme4)
+library(lmerTest)
+library(sf)
+library(patchwork)
+
+options(na.action = "na.fail")
+```
+
+
+# Load data
+ Load in ant-plant island-mainland pairs
+```{r}
+if(!BOOL_REQUIRE_OVERLAP) {
+  dat <- readRDS("data/GIFT_EFN_trait_data.RDS")
+  dat.ant <- readRDS("data/GABI_efn_trait_data.RDS")
+} else {
+  dat <- readRDS("data/GIFT_EFN_trait_data_sp_overlap.RDS") #to run with overlap of species required between islands and mainlands
+  dat.ant <- readRDS("data/GABI_efn_trait_data_sp_overlap.RDS")
+}
+
+# fix non-numeric columns
+dat <- dat %>% 
+  mutate(efn.pres.ml = as.numeric(efn.pres.ml),
+         efn.abs.ml = as.numeric(efn.abs.ml),
+         efn.pres.i = as.numeric(efn.pres.i),
+         efn.abs.i = as.numeric(efn.abs.i),
+         sprich.plant.ml = as.numeric(sprich.plant.ml),
+         sprich.plant.i = as.numeric(sprich.plant.i))
+
+dat.ant <- dat.ant %>% 
+  mutate(efn.visitor.ml = as.numeric(efn.visitor.ml),
+         efn.nonvisitor.ml = as.numeric(efn.nonvisitor.ml))
+
+island_mainland_pairs <- readRDS("data/island_mainland_pairs_with_antisland_names.RDS")
+```
+Join up all the data so that a row is an island-mainland pair with all trait data for both island and mainland
+Log-transform physical variables to increase normality of residuals
+```{r}
+pairs <- dat %>% 
+  mutate(efn.pres.i = efn.pres.i + 1,
+         efn.abs.i = efn.abs.i + 1,
+         efn.pres.ml = efn.pres.ml + 1,
+         efn.abs.ml = efn.abs.ml + 1,
+         ) %>% 
+  mutate(area.i = as.vector(scale(log10((pmax(area.i,0))+.01))),
+     annual_temp.i = as.vector(scale(log10((pmax(annual_temp.i,0))+0.1))),
+     annual_precip.i = as.vector(scale(log10((pmax(annual_precip.i,0))+.01))),
+     elev_range.i = as.vector(scale(log10((pmax(elev_range.i,0))+.01)))) %>% 
+  mutate(area.ml1 = as.vector(scale(log10((pmax(area.ml1,0))+.01))),
+   annual_temp.ml1 = as.vector(scale(log10((pmax(annual_temp.ml1,0))+0.1))),
+   annual_precip.ml1 = as.vector(scale(log10((pmax(annual_precip.ml1,0))+.01))),
+   elev_range.ml1 = as.vector(scale(log10((pmax(elev_range.ml1,0))+.01))),
+   distance.ml1 = as.vector(scale(log10((pmax(distance.ml1,0))+0.1)))) %>%
+  mutate(area.ml2 = as.vector(scale(log10((pmax(area.ml2,0))+.01))),
+       annual_temp.ml2 = as.vector(scale(log10((pmax(annual_temp.ml2,0))+0.1))),
+       annual_precip.ml2 = as.vector(scale(log10((pmax(annual_precip.ml2,0))+.01))),
+       elev_range.ml2 = as.vector(scale(log10((pmax(elev_range.ml2,0))+.01))),
+       distance.ml2 = as.vector(scale(log10((pmax(distance.ml2,0))+0.1)))) %>%  
+  mutate(area.ml3 = as.vector(scale(log10((pmax(area.ml3,0))+.01))),
+       annual_temp.ml3 = as.vector(scale(log10((pmax(annual_temp.ml3,0))+0.1))),
+       annual_precip.ml3 = as.vector(scale(log10((pmax(annual_precip.ml3,0))+.01))),
+       elev_range.ml3 = as.vector(scale(log10((pmax(elev_range.ml3,0))+.01))),
+       distance.ml3 = as.vector(scale(log10((pmax(distance.ml3,0))+0.1)))) %>%    
+  mutate(area.ml4 = as.vector(scale(log10((pmax(area.ml4,0))+.01))),
+   annual_temp.ml4 = as.vector(scale(log10((pmax(annual_temp.ml4,0))+0.1))),
+   annual_precip.ml4 = as.vector(scale(log10((pmax(annual_precip.ml4,0))+.01))),
+   elev_range.ml4 = as.vector(scale(log10((pmax(elev_range.ml4,0))+.01))),
+   distance.ml4 = as.vector(scale(log10((pmax(distance.ml4,0))+0.1)))) %>%
+  mutate(area.ml5 = as.vector(scale(log10((pmax(area.ml5,0))+.01))),
+   annual_temp.ml5 = as.vector(scale(log10((pmax(annual_temp.ml5,0))+0.1))),
+   annual_precip.ml5 = as.vector(scale(log10((pmax(annual_precip.ml5,0))+.01))),
+   elev_range.ml5 = as.vector(scale(log10((pmax(elev_range.ml5,0))+.01))),
+   distance.ml5 = as.vector(scale(log10((pmax(distance.ml5,0))+0.1))))
+
+pairs.ant <- dat.ant %>% 
+  mutate(efn.visitor.i = efn.visitor.i + 1,
+         efn.nonvisitor.i = efn.nonvisitor.i + 1,
+         efn.visitor.ml = efn.visitor.ml + 1,
+         efn.nonvisitor.ml = efn.nonvisitor.ml + 1,
+         ) %>% 
+  mutate(area.i = as.vector(scale(log10((pmax(area.i,0))+.01))),
+     annual_temp.i = as.vector(scale(log10((pmax(annual_temp.i,0))+0.1))),
+     annual_precip.i = as.vector(scale(log10((pmax(annual_precip.i,0))+.01)))) %>%
+  mutate(area.ml1 = as.vector(scale(log10((pmax(area.ml1,0))+.01))),
+   annual_temp.ml1 = as.vector(scale(log10((pmax(annual_temp.ml1,0))+0.1))),
+   annual_precip.ml1 = as.vector(scale(log10((pmax(annual_precip.ml1,0))+.01))),
+   dist.ml1 = as.vector(scale(log10((pmax(dist.ml1,0))+0.1)))) %>%
+  mutate(area.ml2 = as.vector(scale(log10((pmax(area.ml2,0))+.01))),
+       annual_temp.ml2 = as.vector(scale(log10((pmax(annual_temp.ml2,0))+0.1))),
+       annual_precip.ml2 = as.vector(scale(log10((pmax(annual_precip.ml2,0))+.01))),
+       dist.ml2 = as.vector(scale(log10((pmax(dist.ml2,0))+0.1)))) %>%  
+  mutate(area.ml3 = as.vector(scale(log10((pmax(area.ml3,0))+.01))),
+       annual_temp.ml3 = as.vector(scale(log10((pmax(annual_temp.ml3,0))+0.1))),
+       annual_precip.ml3 = as.vector(scale(log10((pmax(annual_precip.ml3,0))+.01))),
+       dist.ml3 = as.vector(scale(log10((pmax(dist.ml3,0))+0.1)))) %>%    
+  mutate(area.ml4 = as.vector(scale(log10((pmax(area.ml4,0))+.01))),
+   annual_temp.ml4 = as.vector(scale(log10((pmax(annual_temp.ml4,0))+0.1))),
+   annual_precip.ml4 = as.vector(scale(log10((pmax(annual_precip.ml4,0))+.01))),
+   dist.ml4 = as.vector(scale(log10((pmax(dist.ml4,0))+0.1)))) %>%
+  mutate(area.ml5 = as.vector(scale(log10((pmax(area.ml5,0))+.01))),
+   annual_temp.ml5 = as.vector(scale(log10((pmax(annual_temp.ml5,0))+0.1))),
+   annual_precip.ml5 = as.vector(scale(log10((pmax(annual_precip.ml5,0))+.01))),
+   dist.ml5 = as.vector(scale(log10((pmax(dist.ml5,0))+0.1))))
+
+## calculate means of biogeographical variables across all 5 mainlands
+
+pairs <- pairs %>% 
+  rowwise() %>% 
+  mutate(area.ml = mean(c_across(starts_with("area.ml")))) %>%
+  mutate(elev_range.ml = mean(c_across(starts_with("elev_range.ml")))) %>%
+  mutate(annual_temp.ml = mean(c_across(starts_with("annual_temp.ml")))) %>%
+  mutate(annual_precip.ml = mean(c_across(starts_with("annual_precip.ml")))) %>% 
+  mutate(distance.ml = mean(c_across(starts_with("distance.ml")))) %>% 
+  ungroup()
+
+names(pairs)
+
+pairs.ant <- pairs.ant %>% 
+  rowwise() %>% 
+  mutate(area.ml = mean(c_across(starts_with("area.ml")))) %>% 
+  mutate(annual_temp.ml = mean(c_across(starts_with("annual_temp.ml")))) %>% 
+  mutate(annual_precip.ml = mean(c_across(starts_with("annual_precip.ml")))) %>% 
+  mutate(distance.ml = mean(c_across(starts_with("dist.ml")))) %>% 
+  ungroup()
+
+names(pairs.ant)
+```
+#Data summaries:
+```{r}
+pairs.summary <- pairs %>% 
+  mutate('stat' = case_when(
+    efn.pres.i == 1 & efn.pres.ml == 1 ~ "1-bothzero",
+    efn.pres.ml <= 6 ~ "2-ml<5efns",
+    efn.pres.ml > 6 ~ "3-ml>5efns"
+  )) %>% 
+  select(stat, latitude.i) %>% 
+  group_by(stat) %>% 
+  summarize(total = n(), med_latitude = median(abs(latitude.i)))
+
+pairs.summary2 <- pairs %>% 
+  filter(efn.pres.ml > 6) %>% 
+  select(efn.pres.ml)
+summary(pairs.summary2)
+  
+```
+# Calculations
+Calculate species richness differences
+```{r}
+pairs <- pairs %>% 
+  mutate(abslatitude.ml = abs(mean_latitude.ml)) %>% 
+  mutate(abslatitude.i = abs(latitude.i)) %>% 
+  mutate(elev_range.i = ifelse(elev_range.i==0,1, elev_range.i)) %>% 
+  mutate(elev_range.i = ifelse(is.na(elev_range.i),1, elev_range.i)) %>% 
+  mutate(elev_range.ml = ifelse(elev_range.ml==0,1, elev_range.ml)) %>% 
+  mutate(elev_range.ml = ifelse(is.na(elev_range.ml),1, elev_range.ml)) %>% 
+  select(-c(biome, GDP_satellite, Popdensity, Human_Footprint, Human_Influence, geology, 
+            age_Ma, Island.Name)) %>% 
+  drop_na()
+
+pairs.ant <- pairs.ant %>% 
+  mutate(abslatitude.ml = abs(mean_latitude.ml)) %>% 
+  mutate(abslatitude.i = abs(latitude.i)) %>% 
+  drop_na()
+
+pairs <- pairs %>% 
+  mutate(sprich.plant.i = efn.pres.i + efn.abs.i) %>% 
+  mutate(sprich.plant.ml = efn.pres.ml + efn.abs.ml) %>% 
+  mutate(efn.pres.diff = efn.pres.ml - efn.pres.i) %>% 
+  mutate(efn.abs.diff = efn.abs.ml - efn.abs.i) %>% 
+  mutate(sprichdiff.plant = sprich.plant.ml - sprich.plant.i) #%>% 
+
+pairs.ant <- pairs.ant %>% 
+  mutate(sprich.ants.i = efn.visitor.i + efn.nonvisitor.i) %>% 
+  mutate(sprich.ants.ml = efn.visitor.ml + efn.nonvisitor.ml) %>% 
+  mutate(efn.visitor.diff = efn.visitor.ml - efn.visitor.i) %>% 
+  mutate(nonefn.visitor.diff = efn.nonvisitor.ml - efn.nonvisitor.i) %>% 
+  mutate(sprichdiff.ant = sprich.ants.ml - sprich.ants.i)
+
+# add log response ratios
+pairs <- pairs %>% 
+  mutate(lrr.efn.pres = (log10(efn.pres.i / efn.pres.ml))) %>% 
+  mutate(lrr.efn.abs = (log10(efn.abs.i / efn.abs.ml))) %>% 
+  mutate(lrr.plant = (log10(sprich.plant.i / sprich.plant.ml)))
+
+pairs.ant <- pairs.ant %>% 
+  mutate(lrr.efn.visitor = (log10(efn.visitor.i / efn.visitor.ml))) %>% 
+  mutate(lrr.nonefn.visitor = (log10(efn.nonvisitor.i / efn.nonvisitor.ml))) %>% 
+  mutate(lrr.ants = (log10(sprich.ants.i / sprich.ants.ml)))
+
+```
+# Plots - Plants
+Get data into long form for ggplot
+```{r}
+pairs.alldiff <- pairs %>% 
+  select(c('pairID', 'efn.pres.diff', 'efn.abs.diff', 'entity_ID.ml1', 'entity_ID.ml2', 'entity_ID.ml3',
+           'entity_ID.ml4', 'entity_ID.ml5', 'entity_ID.i', 'sprich.plant.i', 'sprich.plant.ml', 'latitude.i', 'mean_latitude.ml', 'longitude.i', 'abslatitude.i', 'abslatitude.ml', 'area.i', 'area.ml', 'elev_range.i', 'elev_range.ml', 'annual_temp.i', 'annual_temp.ml', 'annual_precip.i', 'annual_precip.ml','distance.ml')) %>% 
+  pivot_longer(cols = c(efn.pres.diff, efn.abs.diff),
+               names_to = "efn",
+               values_to = "diff") %>% 
+  mutate(efn = case_when(efn == "efn.pres.diff" ~ "efn.pres",
+                         efn == "efn.abs.diff" ~ "efn.abs"))
+
+pairs.all.exp <- pairs %>% 
+  select(c('pairID', 'efn.pres.ml', 'efn.abs.ml')) %>% 
+  pivot_longer(cols = c(efn.pres.ml, efn.abs.ml),
+               names_to = "efn", 
+               values_to = "exp") %>% 
+  mutate(efn = case_when(efn == "efn.pres.ml" ~ "efn.pres",
+                         efn == "efn.abs.ml" ~ "efn.abs"))
+
+pairs.all.obs <- pairs %>% 
+  select(c('pairID', 'efn.pres.i', 'efn.abs.i')) %>% 
+  pivot_longer(cols = c(efn.pres.i, efn.abs.i),
+               names_to = "efn",
+               values_to = "obs") %>% 
+  mutate(efn = case_when(efn == "efn.pres.i" ~ "efn.pres",
+                         efn == "efn.abs.i" ~ "efn.abs"))
+
+pairs.all.lrr <- pairs %>% 
+  select(c('pairID', 'lrr.efn.pres', 'lrr.efn.abs')) %>% 
+  pivot_longer(cols = c(lrr.efn.pres, lrr.efn.abs),
+               names_to = "efn",
+               values_to = "lrr") %>% 
+  mutate(efn = case_when(efn == "lrr.efn.pres" ~ "efn.pres",
+                         efn == "lrr.efn.abs" ~ "efn.abs"))
+
+pairs.all <- pairs.alldiff %>% 
+  left_join(pairs.all.exp, by = c("efn", "pairID")) %>% 
+  left_join(pairs.all.obs, by = c("efn", "pairID")) %>% 
+  left_join(pairs.all.lrr, by = c("efn", "pairID")) %>% 
+  mutate(efn = as.factor(efn))
+
+pairs.efn.pres <- pairs.all %>% 
+  filter(efn == "efn.pres")
+
+pairs.efn.abs <- pairs.all %>% 
+  filter(efn == "efn.abs")
+
+
+```
+Plot
+```{r}
+ggplot(pairs.efn.pres, aes(x = efn, y = exp)) + 
+  geom_boxplot() +
+  geom_jitter(position=position_jitter(0.2), color = "purple", alpha = 0.5)
+
+ggplot(pairs.efn.abs, aes(x = efn, y = exp)) + 
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "purple", alpha = 0.5)
+
+ggplot(pairs.efn.pres, aes(x = efn, y = obs)) + 
+  geom_boxplot() +
+  geom_jitter(position=position_jitter(0.2), color = "darkgreen", alpha = 0.5)
+
+ggplot(pairs.efn.abs, aes(x = efn, y = obs)) + 
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "darkgreen", alpha = 0.5)
+
+p1 <- ggplot(pairs.efn.pres, aes(x = efn, y = lrr)) +
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "slateblue", alpha = 0.5) + 
+  labs(title = "With EFNs",
+     y = "Log Response Ratio (LRR)") +
+  theme_minimal()
+
+p2 <- ggplot(pairs.efn.abs, aes(x = efn, y = lrr)) +
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "slateblue", alpha = 0.5) +
+  labs(title = "Without EFNs",
+       y = "Log Response Ratio (LRR)") +
+  theme_minimal()
+
+combined_plot <- p1 + p2 + plot_annotation(title = "Plants: Log Response Ratio of Species With and Without EFNs")
+
+combined_plot
+```
+How does difference between mainland and island EFN species richness vary with latitude? 
+
+```{r}
+ggplot(pairs.efn.pres, aes(x=abslatitude.i, y=diff)) +
+  geom_point(color = "darkred", alpha = 0.5) +
+  labs(x = "absolute latitude (island)", y = "difference (mainland-island) richness") +
+  ggtitle("Difference (mainland-island) richness vs absolute latitude, EFNs present")
+
+ggplot(pairs.efn.abs, aes(x=abslatitude.i, y=diff)) +
+  geom_point(color = "springgreen4", alpha=0.5) +
+  labs(x = "absolute latitude (island)", y = "difference (mainland-island) richness") +
+  ggtitle("Difference (mainland-island) richness vs absolute latitude, EFNs absent")
+
+lm.efn.pres = lm(obs ~ abslatitude.i, data = pairs.efn.pres)
+summary(lm.efn.pres)
+p_value.efn.pres <- summary(lm.efn.pres)$coefficients[2, 4]  # Extract p-value for the slope
+
+lm.efn.abs = lm (obs ~ abslatitude.i, data = pairs.efn.abs)
+summary(lm.efn.abs)
+p_value.efn.abs <- summary(lm.efn.abs)$coefficients[2,4]
+
+ggplot(pairs.efn.pres, aes(x=abslatitude.i, y=obs)) +
+  geom_point(color = "purple", alpha = 0.5) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "absolute latitude (island)", y = "island species richness") +
+  ggtitle("Island species richness vs. absolute latitude, EFNs present") +
+    annotate("text", x = min(pairs.efn.pres$abslatitude.i), 
+           y = max(pairs.efn.pres$obs), 
+           label = paste("p =", round(p_value.efn.pres, 4)), 
+           hjust = 0, size = 5)
+
+ggplot(pairs.efn.abs, aes(x=abslatitude.i, y=obs)) +
+  geom_point(color = "purple", alpha = 0.5) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "absolute latitude (island)", y = "island species richness") +
+  ggtitle("Island species richness vs. absolute latitude, EFNs absent") +
+    annotate("text", x = min(pairs.efn.abs$abslatitude.i), 
+           y = max(pairs.efn.abs$obs), 
+           label = paste("p =", round(p_value.efn.abs, 4)), 
+           hjust = 0, size = 5)
+
+pairs.all.plot <- pairs.all %>% 
+  mutate(efn = case_when(efn == "efn.pres" ~ "EFNs present",
+                         efn == "efn.abs" ~ "EFNs absent"))
+
+saveRDS(pairs.all.plot, "data/pairs.all.plot-overlapreq.RDS")
+
+latpairs.plot <- 
+ggplot(pairs.all.plot, aes(x=abslatitude.i, y=lrr, color=efn)) +
+  geom_point(size=2) + 
+  geom_smooth(method="lm") + 
+  labs(x = "Absolute latitude (degrees)", y = "LRR (island to mainland species richness)") +
+  #scale_y_continuous(trans = pseudo_log_trans()) +
+  scale_colour_manual(values = c("palegreen3", "mediumpurple2")) +
+  theme_minimal() + 
+  theme(
+    panel.grid.major = element_line(color = "grey40", linewidth = 0.5),
+    panel.grid.minor = element_line(color = "grey40", linewidth = 0.5)
+  ) + 
+  ggtitle("Plants: Log response ratio of island to mainland species richness vs absolute latitude and EFN status")
+# write out
+jpeg("figures/EFN_Plants_LatPoints_MainlandIslandPairs.jpg", width = 10, height = 6, units = 'in', res = 300)
+latpairs.plot
+dev.off()
+```
+Cut and aggregate data
+```{r}
+# set vars
+x_var = pairs.all$abslatitude.i
+efn_var= pairs.all$efn
+
+y_var = pairs.all$lrr
+
+df <- data.frame("xvar" = x_var,"yvar" = y_var,"efn"=efn_var)
+
+# create binned y-values for the x-axis
+quantiles_for_cutting <- quantile(df$xvar,seq(0,1,.20))
+
+# cut the data
+df$cuts_raw <- cut(df$xvar,breaks = quantiles_for_cutting, include.lowest = T)
+
+# calculate the average value within each bin of the x-axis data
+mean_per_cut <- df %>% group_by(cuts_raw) %>%
+  summarize(mean_cut_xval = mean(xvar))
+
+#now use the "mean_per_cut" to define our new cuts
+df$cuts_labeled <- as.numeric(as.character(cut(df$xvar,breaks = quantiles_for_cutting,
+                                               labels = mean_per_cut$mean_cut_xval, include.lowest = T)))
+
+#now calculate the mean response variable values within each bin: 95% CIs assuming a normal distribution here
+aggregated_data <- df %>% group_by(cuts_raw,cuts_labeled,efn) %>%
+  summarize(mean_y = mean(yvar),
+            sd_y = sd(yvar),
+            n_y = length(yvar)) %>%
+  mutate(se_y = sd_y/sqrt(n_y),
+         low95CI_y = mean_y-1.96*se_y,
+         high95CI_y = mean_y+1.96*se_y)
+
+diff.aggregated_data <- aggregated_data
+
+```
+# Models - Plants
+```{r}
+
+cor_matrix <- cor(pairs.all[, c("abslatitude.i", "sprich.plant.ml", "area.i", "area.ml", 
+                                 "elev_range.i", "elev_range.ml", "annual_temp.i", "annual_precip.i")], 
+                  use = "pairwise.complete.obs")
+
+print(cor_matrix)
+
+pred.all.diff <- glm(lrr ~ abslatitude.i*efn + distance.ml + area.i + area.ml + elev_range.i + elev_range.ml +  annual_precip.i  ,data = pairs.all) 
+summary(pred.all.diff)
+
+# check assumptions
+par(mfrow = c(2,2)) # this ensures all the plots show up at once
+plot(pred.all.diff)
+
+
+# Plot predicted values vs residual values
+par(mar = c(4, 4, 0.5, 0.5))
+plot(resid(pred.all.diff) ~ fitted(pred.all.diff), xlab = "Predicted values", ylab = "Normalized residuals")
+abline(h = 0, lty = 2)
+```
+#Plots - Ants
+Get data into long form for ggplot
+```{r}
+pairs.alldiff.ants <- pairs.ant %>% 
+  select(c('pairID', 'efn.visitor.diff', 'nonefn.visitor.diff', 'BENTITY2_N.ml1',
+           'BENTITY2_N.ml2', 'BENTITY2_N.ml3', 'BENTITY2_N.ml4', 'BENTITY2_N.ml5', 'entityID.i', 'sprich.ants.i', 'sprich.ants.ml', 'abslatitude.i', 'mean_latitude.ml', 'area.i', 'area.ml', 'annual_temp.i', 'annual_temp.ml', 'annual_precip.i', 'annual_precip.ml', 'distance.ml')) %>% 
+  pivot_longer(cols = c(efn.visitor.diff, nonefn.visitor.diff),
+               names_to = "efn",
+               values_to = "diff") %>% 
+  mutate(efn = case_when(efn == "efn.visitor.diff" ~ "efn.pres",
+                         efn == "nonefn.visitor.diff" ~ "efn.abs"))
+
+pairs.all.exp.ants <- pairs.ant %>% 
+  select(c('pairID', 'efn.visitor.ml', 'efn.nonvisitor.ml')) %>% 
+  pivot_longer(cols = c(efn.visitor.ml, efn.nonvisitor.ml),
+               names_to = "efn", 
+               values_to = "exp") %>% 
+  mutate(efn = case_when(efn == "efn.visitor.ml" ~ "efn.pres",
+                         efn == "efn.nonvisitor.ml" ~ "efn.abs"))
+
+pairs.all.obs.ants <- pairs.ant %>% 
+  select(c('pairID', 'efn.visitor.i', 'efn.nonvisitor.i')) %>% 
+  pivot_longer(cols = c(efn.visitor.i, efn.nonvisitor.i),
+               names_to = "efn",
+               values_to = "obs") %>% 
+  mutate(efn = case_when(efn == "efn.visitor.i" ~ "efn.pres",
+                         efn == "efn.nonvisitor.i" ~ "efn.abs"))
+
+pairs.all.lrr.ants <- pairs.ant %>% 
+  select(c('pairID', 'lrr.efn.visitor', 'lrr.nonefn.visitor')) %>% 
+  pivot_longer(cols = c(lrr.efn.visitor, lrr.nonefn.visitor),
+               names_to = "efn",
+               values_to = "lrr") %>% 
+  mutate(efn = case_when(efn == "lrr.efn.visitor" ~ "efn.pres",
+                         efn == "lrr.nonefn.visitor" ~ "efn.abs"))
+
+pairs.all.ants <- pairs.alldiff.ants %>% 
+  left_join(pairs.all.exp.ants, by = c("efn", "pairID")) %>% 
+  left_join(pairs.all.obs.ants, by = c("efn", "pairID")) %>% 
+  left_join(pairs.all.lrr.ants, by = c("efn", "pairID")) %>% 
+  mutate(efn = as.factor(efn))
+
+pairs.efn.visitor <- pairs.all.ants %>% 
+  filter(efn == "efn.pres")
+
+pairs.nonefn.visitor <- pairs.all.ants %>% 
+  filter(efn == "efn.abs")
+
+```
+Plot
+```{r}
+ggplot(pairs.efn.visitor, aes(x = efn, y = exp)) + 
+  geom_boxplot() +
+  geom_jitter(position=position_jitter(0.2), color = "purple", alpha = 0.5)
+
+ggplot(pairs.nonefn.visitor, aes(x = efn, y = exp)) + 
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "purple", alpha = 0.5)
+
+ggplot(pairs.efn.visitor, aes(x = efn, y = obs)) + 
+  geom_boxplot() +
+  geom_jitter(position=position_jitter(0.2), color = "darkgreen", alpha = 0.5)
+
+ggplot(pairs.nonefn.visitor, aes(x = efn, y = obs)) + 
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "darkgreen", alpha = 0.5)
+
+p1.a <- ggplot(pairs.efn.visitor, aes(x = efn, y = lrr)) +
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "slateblue", alpha = 0.5) + 
+  labs(title = "EFN-visiting",
+     y = "Log Response Ratio (LRR)") +
+  theme_minimal()
+
+p2.a <- ggplot(pairs.efn.visitor, aes(x = efn, y = lrr)) +
+  geom_boxplot() + 
+  geom_jitter(position=position_jitter(0.2), color = "slateblue", alpha = 0.5) +
+  labs(title = "Non-EFN-visiting",
+       y = "Log Response Ratio (LRR)") +
+  theme_minimal()
+
+combined_plot.a <- p1.a + p2.a + plot_annotation(title = "Ants: Log Response Ratio of Species That Do and Do Not Visit EFNs")
+
+combined_plot.a
+```
+How does difference between mainland and island EFN species richness vary with latitude? 
+
+```{r}
+ggplot(pairs.efn.visitor, aes(x=abslatitude.i, y=diff)) +
+  geom_point(color = "darkred", alpha = 0.5) +
+  labs(x = "absolute latitude", y = "difference (mainland-island) richness") +
+  ggtitle("Difference (mainland-island) richness vs absolute latitude, EFN visiting ants")
+
+ggplot(pairs.nonefn.visitor, aes(x=abslatitude.i, y=diff)) +
+  geom_point(color = "springgreen4", alpha=0.5) +
+  labs(x = "absolute latitude", y = "difference (mainland-island) richness") +
+  ggtitle("Difference (mainland-island) richness vs absolute latitude, non-EFN visiting ants")
+
+lm.efn.visitor = lm(obs ~ abslatitude.i, data = pairs.efn.visitor)
+summary(lm.efn.visitor)
+p_value.efn.visitor <- summary(lm.efn.visitor)$coefficients[2, 4]  # Extract p-value for the slope
+
+lm.nonefn.visitor = lm (obs ~ abslatitude.i, data = pairs.nonefn.visitor)
+summary(lm.nonefn.visitor)
+p_value.nonefn.visitor <- summary(lm.nonefn.visitor)$coefficients[2,4]
+
+ggplot(pairs.efn.visitor, aes(x=abslatitude.i, y=obs)) +
+  geom_point(color = "purple", alpha = 0.5) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "absolute latitude (island)", y = "island species richness") +
+  ggtitle("Island species richness vs. absolute latitude, EFN visitors") +
+    annotate("text", x = min(pairs.efn.pres$abslatitude.i), 
+           y = max(pairs.efn.pres$obs), 
+           label = paste("p =", round(p_value.efn.visitor, 4)), 
+           hjust = 0, size = 5)
+
+ggplot(pairs.nonefn.visitor, aes(x=abslatitude.i, y=obs)) +
+  geom_point(color = "purple", alpha = 0.5) + 
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(x = "absolute latitude (island)", y = "island species richness") +
+  ggtitle("Island species richness vs. absolute latitude, EFN non-visitors") + 
+    annotate("text", x = min(pairs.efn.pres$abslatitude.i), 
+           y = max(pairs.efn.pres$obs), 
+           label = paste("p =", round(p_value.nonefn.visitor, 4)), 
+           hjust = 0, size = 5)
+
+pairs.all.ants.plot <- pairs.all.ants %>% 
+  mutate(efn = case_when(efn == "efn.pres" ~ "EFN-visiting",
+                         efn == "efn.abs" ~ "non-EFN-visiting"))
+
+antpairs.plot <-
+  ggplot(pairs.all.ants.plot, aes(x=abslatitude.i, y=lrr, color=efn)) +
+  geom_point(size=2) +
+  geom_smooth(method="lm") +
+  labs(x = "Absolute latitude (degrees)", y = "LRR (island to mainland species richness)") +
+  ggtitle("Ants: Log response ratio of island to mainland species richness vs absolute latitude by EFN visiting status") +
+  #scale_y_continuous(trans = pseudo_log_trans()) +
+  scale_colour_manual(values = c("mediumpurple2", "palegreen3")) +
+  theme_minimal() + 
+  theme(
+    panel.grid.major = element_line(color = "grey40", linewidth = 0.5),
+    panel.grid.minor = element_line(color = "grey40", linewidth = 0.5)
+  ) 
+# write out
+jpeg("figures/EFN_Ants_LatPoints_MainlandIslandPairs.jpg", width = 10, height = 6, units = 'in', res = 300)
+antpairs.plot
+dev.off()
+
+```
+Cut and aggregate data
+```{r}
+# set vars
+x_var = pairs.all.ants$abslatitude.i
+efn_var= pairs.all.ants$efn
+
+y_var = pairs.all.ants$lrr
+
+df <- data.frame("xvar" = x_var,"yvar" = y_var,"efn"=efn_var)
+
+# create binned y-values for the x-axis
+quantiles_for_cutting <- quantile(df$xvar,seq(0,1,.20))
+
+# cut the data
+df$cuts_raw <- cut(df$xvar,breaks = quantiles_for_cutting, include.lowest = T)
+
+# calculate the average value within each bin of the x-axis data
+mean_per_cut <- df %>% group_by(cuts_raw) %>%
+  summarize(mean_cut_xval = mean(xvar))
+
+#now use the "mean_per_cut" to define our new cuts
+df$cuts_labeled <- as.numeric(as.character(cut(df$xvar,breaks = quantiles_for_cutting,
+                                               labels = mean_per_cut$mean_cut_xval, include.lowest = T)))
+
+#now calculate the mean response variable values within each bin: 95% CIs assuming a normal distribution here
+aggregated_data.ants <- df %>% group_by(cuts_raw,cuts_labeled,efn) %>%
+  summarize(mean_y = mean(yvar),
+            sd_y = sd(yvar),
+            n_y = length(yvar)) %>%
+  mutate(se_y = sd_y/sqrt(n_y),
+         low95CI_y = mean_y-1.96*se_y,
+         high95CI_y = mean_y+1.96*se_y)
+
+diff.aggregated_data.ants <- aggregated_data.ants
+```
+
+# Models - Ants
+```{r}
+pred.all.diff.ants <- glm(lrr ~ abslatitude.i*efn + distance.ml + area.i + area.ml + annual_precip.i ,data = pairs.all.ants) 
+summary(pred.all.diff.ants)
+```
+
+#Models: island species richness
+```{r}
+island_sprich.mod.plants <- glm(obs ~ abslatitude.i * efn + sprich.plant.ml +  distance.ml + area.i + area.ml + elev_range.i + elev_range.ml + annual_precip.i, data = pairs.all )
+
+summary(island_sprich.mod.plants)
+
+island_sprich.mod.ants <- glm(obs ~ abslatitude.i * efn + sprich.ants.ml + distance.ml + area.i + area.ml + annual_precip.i, data = pairs.all.ants)
+
+summary(island_sprich.mod.ants)
+```
+
+# models: ants from plants
+combine ant and plant count data to model ant species richness as a function of plant species richness
+
+```{r}
+ants.for.merge <- pairs %>% 
+  left_join(pairs.ant, by = c("entity_ID.i" = "entityID.i"))
+
+ants.for.merge <- ants.for.merge %>% 
+  select(-matches("(ml1.?|ml2.?|ml3.?|ml4.?|ml5.?).?$"))
+
+pairs.antplant <- ants.for.merge %>% 
+  select(c("pairID.x", "entity_ID.i", "sprich.plant.i", "sprich.plant.ml", "sprich.ants.i", "sprich.ants.ml", "latitude.i.x", "mean_latitude.ml.y", "longitude.i.x", "abslatitude.i.x", "area.i.x", "area.ml.y","annual_temp.i.x", "annual_temp.ml.y", "annual_precip.i.x", "efn.pres.i", "efn.pres.ml","mean_dist.y", "efn.abs.i", "efn.abs.ml", "efn.visitor.i", "efn.nonvisitor.i" ,"efn.visitor.ml", "efn.nonvisitor.ml"))
+
+antplant.model.1 <- glm(efn.visitor.i ~ efn.pres.i + efn.abs.i + abslatitude.i.x + area.i.x + mean_dist.y + annual_precip.i.x, data = pairs.antplant)
+
+summary(antplant.model.1)
+
+antplant.model.2 <- glm(efn.nonvisitor.i ~ efn.pres.i + efn.abs.i + abslatitude.i.x + area.i.x + mean_dist.y + annual_precip.i.x, data = pairs.antplant)
+summary(antplant.model.2)
+```
+

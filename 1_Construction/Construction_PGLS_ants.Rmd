@@ -1,0 +1,107 @@
+---
+title: "PGLS Construction - Ants"
+output: html_notebook
+---
+
+Notebook setup
+```{r setup, include=FALSE}
+# Set the working directory
+knitr::opts_knit$set(root.dir = "C:/Users/wande/Documents/EEB498_R/island_ldg")
+```
+
+Dependencies setup
+```{r}
+library(tidyverse)
+packageVersion("tidyverse") # ‘2.0.0’
+library(stringr)
+packageVersion("stringr") # ‘1.5.1’
+library(nlme)
+packageVersion("nlme") # ‘3.1.166’
+library(ape)
+packageVersion("ape") # ‘5.8’
+```
+
+Data Loads
+
+Liu, C., Economo, E. P., & Guénard, B. (2023). GABI‐I: The global ant biodiversity informatics‐island database. Ecology (Durham), 104(4), e3969-n/a. https://doi.org/10.1002/ecy.3969
+
+Nathan, P., E. P. Economo, B. Guénard, A. K. Simonsen, and M. E. Frederickson. 2023. Generalized mutualisms promote range expansion in both plant and ant partners. Proceedings of the Royal Society B: Biological Sciences 290:20231083.
+https://datadryad.org/stash/dataset/doi:10.5061/dryad.jm63xsjh6
+
+```{r}
+island_ants <- read.csv("data/GABI-I.csv")
+
+islands <- island_ants %>% 
+  mutate(latlong = paste(Lat, Long, sep = ",")) %>% 
+  distinct(latlong, .keep_all = TRUE) %>%
+  dplyr::select(c("Island.Name", "latlong")) 
+
+efn.trait <- read.csv("data/Species_EFN_Data.csv", header = TRUE)
+
+unique_island_ant_ssp <- island_ants %>% 
+  mutate(
+    Taxon.code2 = str_replace_all(Taxon.code, "\\.", " ") # replace . with space for left join
+  ) %>% 
+  left_join(efn.trait, by = c("Taxon.code2" = "Name")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN)) %>% 
+  select(c(Taxon.code2, EFN)) %>% 
+  distinct(Taxon.code2, .keep_all = TRUE)
+
+unique_gabi_ants <- read.csv("GABI_shapefiles/GABI_Data_Release1.0_18012020.csv") %>% 
+  mutate(
+    Taxon.code2 = str_replace_all(valid_species_name, "\\.", " ") # replace . with space for left join
+  ) %>% 
+  left_join(efn.trait, by = c("Taxon.code2" = "Name")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN)) %>% 
+  select(c(Taxon.code2, EFN)) %>% 
+  distinct(Taxon.code2, .keep_all = TRUE)
+```
+
+Merge ant lists and flag for island presence
+```{r}
+ants_merged <- rbind(unique_island_ant_ssp, unique_gabi_ants) %>% 
+  distinct(Taxon.code2, .keep_all = TRUE)
+
+ants_merged <- ants_merged %>% 
+  mutate(on_islands = case_when(Taxon.code2 %in% unique_island_ant_ssp$Taxon.code2 ~ 1,
+                                TRUE ~ 0))
+
+summary <- ants_merged %>% 
+  group_by(on_islands) %>% 
+  summarize(total = n())
+```
+Bring in phylogeny and find intersection between ant species available in phylogeny and databases
+Nelsen, M. P., Ree, R. H., & Moreau, C. S. (2018). Ant–plant interactions evolved through increasing interdependence. Proceedings of the National Academy of Sciences, 115(48), 12253-12258. 
+https://datadryad.org/dataset/doi:10.5061/dryad.ft4sn88
+```{r}
+ant_tree <- ape::read.tree("data/ant_tree.tre")
+
+ants_merged$species_fixed <- gsub(" ", "_", ants_merged$Taxon.code2)
+rownames(ants_merged) <- ants_merged$species_fixed
+common_species <- intersect(rownames(ants_merged), ant_tree$tip.label)
+ants_merged <- ants_merged[common_species, ]
+
+tree_clean <- drop.tip(ant_tree, setdiff(ant_tree$tip.label, common_species))
+
+all(rownames(ants_merged) %in% tree_clean$tip.label)
+```
+
+Build PGLS
+```{r}
+library(phylolm)
+
+glm_check <- glm(on_islands ~ EFN,
+                 data = ants_merged,
+                 family = binomial)
+
+summary(glm_check)
+
+model <- phyloglm(on_islands ~ EFN,
+                  data = ants_merged,
+                  phy = tree_clean,
+                  method = "logistic_MPLE",
+                  boot = 100)
+
+summary(model)
+```
+

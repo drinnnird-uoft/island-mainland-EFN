@@ -1,0 +1,162 @@
+---
+title: "Species Occurrences"
+output: html_notebook
+---
+
+#Notebook setup
+```{r setup, include=FALSE}
+# Set the working directory
+knitr::opts_knit$set(root.dir = "C:/Users/wande/Documents/EEB498_R/island_ldg")
+```
+#Dependencies
+```{r}
+library(tidyverse)
+library(stringr)
+library(rgbif)
+library(maps)
+
+
+
+options(na.action = "na.fail")
+```
+
+```{r}
+get_occurrences_count <- function(speciesName) {
+  taxon <- tryCatch({
+    name_backbone(speciesName)
+  }, error = function(e) {
+    message(paste("Error in name_backbone for species:", speciesName))
+    message(paste("Error message:", e$message))
+    return(data.frame())  # Return empty data frame on error
+  })
+  
+    # Check if taxon is empty from the error handler
+  if (nrow(taxon) == 0) {
+    return(NA)
+  }
+  taxon <- taxon %>% 
+    filter(!matchType == "NONE") %>% 
+    slice(1)
+  
+  if (rlang::has_name(taxon, "usageKey")) {
+   if(nrow(taxon) == 0) {
+      return (NA)
+    } else {
+      
+      # Try to get occurrence count with error handling
+      c <- tryCatch({
+        occ_count(taxonKey = taxon$usageKey)
+      }, error = function(e) {
+        message(paste("Error in occ_count for taxonKey:", taxon$usageKey))
+        message(paste("Error message:", e$message))
+        return(NA)  # Return NA if occ_count fails
+      })
+      return (c)
+    }
+  } else {
+    return (NA)
+}
+  
+ 
+  
+ 
+}
+```
+
+
+```{r}
+species <- read.csv("data/species_export.csv")
+head(species)
+
+pairs <- readRDS("data/island_mainland_pairs_with_antisland_names.RDS")
+
+mainland_IDs <- pairs %>% 
+  select(c("entity_ID.ml")) %>% 
+  rename("entity_ID" = "entity_ID.ml")
+
+island_IDs <- pairs %>% 
+  select(c("entity_ID.i")) %>% 
+  rename("entity_ID" = "entity_ID.i")
+
+entity_IDs <- rbind(mainland_IDs, island_IDs) %>% 
+  distinct(entity_ID)
+
+species <- species %>% mutate(entity_ID = as.numeric(entity_ID))
+entity_IDs <- entity_IDs %>%  mutate(entity_ID = as.numeric(entity_ID))
+
+entity_IDs <- entity_IDs$entity_ID
+
+filtered_species <- species %>% 
+  filter(entity_ID %in% entity_IDs) 
+```
+
+```{r}
+# run this if needing to clean up 500 errors that resulted in NAs
+# filtered_species <- filtered_species %>% 
+#   rowwise() %>% 
+#   mutate(occ_count = if(is.na(species)) {
+#     get_occurrences_count(species)
+#   } else {
+#     occ_count
+#   }) %>% 
+#   ungroup()
+
+filtered_species <- filtered_species %>% 
+  rowwise() %>% 
+  mutate(occ_count = get_occurrences_count(species)) %>% 
+  ungroup()
+
+head(filtered_species)
+
+non_rare_species <- filtered_species %>% 
+  filter(occ_count >= 100)
+
+summary(filtered_species$occ_count)
+
+str(filtered_species)
+
+saveRDS(filtered_species, "data/species_export_GBIF_filtered.RDS")
+```
+
+```{r}
+gabi.i <- read.csv("data/GABI-I.csv", header = TRUE) %>% 
+  mutate(
+    Taxon.code2 = str_replace_all(Taxon.code, "\\.", " ") # replace . with space for left join
+  ) %>% 
+  distinct(Taxon.code2)
+
+head(gabi.i)
+
+gabi.i.occ <- gabi.i %>% 
+  rowwise() %>% 
+  mutate(occ_count = get_occurrences_count(Taxon.code2)) %>% 
+  ungroup()
+
+head(gabi.i.occ)
+
+saveRDS(gabi.i.occ, "data/ant_i_species_export_GBIF_filtered.RDS")
+```
+
+```{r}
+rawGABI <- read.csv("GABI_shapefiles/GABI_Data_Release1.0_18012020.csv") %>% 
+  mutate(
+    Taxon.code2 = str_replace_all(valid_species_name, "\\.", " ") # replace . with space for species match
+  ) %>% 
+  distinct(Taxon.code2) %>% 
+  filter()
+
+head(rawGABI)
+
+gabi.ml.occ <- rawGABI %>% 
+  filter( !grepl(":", Taxon.code2)) %>% # remove species names that are not in binomial nomenclature
+  rowwise() %>% 
+  mutate(occ_count = get_occurrences_count(Taxon.code2)) %>% 
+  ungroup()
+
+head(gabi.ml.occ)
+
+saveRDS(gabi.ml.occ, "data/ant_species_export_GBIF_filtered.RDS")
+    
+
+```
+

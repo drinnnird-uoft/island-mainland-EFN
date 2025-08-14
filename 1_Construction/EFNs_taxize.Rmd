@@ -1,0 +1,93 @@
+---
+title: "Taxize EFN Data"
+output: html_notebook
+---
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath("../"))
+```
+
+
+```{r}
+#General
+library(tidyverse)
+library(knitr)
+
+#Taxonomy
+library(taxize)
+```
+
+Load CSV and check names
+
+```{r}
+EFN <- read.csv("data/efn_full_database.csv", header = TRUE)
+EFN$Phy <- as.character(gsub("_", " ", EFN$genus.species))
+
+# get taxize db results for raw names
+#EFN_resolve <- as.data.frame(gnr_resolve(EFN[, "Phy"], best_match_only=TRUE))
+#saveRDS(EFN_resolve, "data/temp_resolved_names.RData")
+
+# load saved taxized names
+EFN_resolve <- readRDS("data/temp_resolved_names.RData")
+EFN_resolve <- filter(EFN_resolve, !is.na(submitted_name))
+
+```
+
+```{r}
+EFN_resolve$num_words <- str_count(EFN_resolve$matched_name, " ")+1
+EFN <- merge(EFN, EFN_resolve, by.y = "user_supplied_name", by.x = "Phy", all.x=TRUE)
+EFN$matched_name <- ifelse(EFN$num_words == 1, NA, EFN$matched_name)
+EFN$matched_name <- ifelse(!is.na(EFN$matched_name), paste0(word(EFN$matched_name, 1, 1), " ", tolower(word(EFN$matched_name, 2, 2))), EFN$matched_name)
+EFN$diff <- EFN$Phy == EFN$matched_name #Check changes between original and matched names
+
+EFN <- EFN[!duplicated(EFN$matched_name), ]
+EFN <- filter(EFN, !is.na(submitted_name))
+EFN$EFN <- 1 # set trait
+```
+
+```{r}
+EFN_synonyms_pow1 <- synonyms(EFN[1:100,"matched_name"], db="pow", rows=1) #Get synonyms
+EFN_synonyms_pow2 <- synonyms(EFN[101:200,"matched_name"], db="pow")
+EFN_synonyms_pow3 <- synonyms(EFN[201:400,"matched_name"], db="pow")
+EFN_synonyms_pow4 <- synonyms(EFN[401:600,"matched_name"], db="pow")
+EFN_synonyms_pow5 <- synonyms(EFN[601:800,"matched_name"], db="pow")
+EFN_synonyms_pow6 <- synonyms(EFN[801:1000,"matched_name"], db="pow")
+EFN_synonyms_pow7 <- synonyms(EFN[1001:1300,"matched_name"], db="pow")
+EFN_synonyms_pow8 <- synonyms(EFN[1301:1600,"matched_name"], db="pow")
+EFN_synonyms_pow9 <- synonyms(EFN[1601:1900,"matched_name"], db="pow")
+EFN_synonyms_pow10 <- synonyms(EFN[1901:2200,"matched_name"], db="pow")
+EFN_synonyms_pow11 <- synonyms(EFN[2201:2500,"matched_name"], db="pow")
+EFN_synonyms_pow12 <- synonyms(EFN[2501:2800,"matched_name"], db="pow")
+EFN_synonyms_pow13 <- synonyms(EFN[2801:3000,"matched_name"], db="pow")
+EFN_synonyms_pow14 <- synonyms(EFN[3001:3200,"matched_name"], db="pow")
+EFN_synonyms_pow15 <- synonyms(EFN[3201:3400,"matched_name"], db="pow")
+EFN_synonyms_pow16 <- synonyms(EFN[3401:3600,"matched_name"], db="pow")
+EFN_synonyms_pow17 <- synonyms(EFN[3601:3800,"matched_name"], db="pow")
+EFN_synonyms_pow18 <- synonyms(EFN[3801:4000,"matched_name"], db="pow")
+EFN_synonyms_pow19 <- synonyms(EFN[4001:4200,"matched_name"], db="pow")
+EFN_synonyms_pow20 <- synonyms(EFN[4201:4248,"matched_name"], db="pow")
+EFN_synonyms_pow <- c(EFN_synonyms_pow1, EFN_synonyms_pow2, EFN_synonyms_pow3, EFN_synonyms_pow4, 
+                      EFN_synonyms_pow5, EFN_synonyms_pow6, EFN_synonyms_pow7, EFN_synonyms_pow8,
+                      EFN_synonyms_pow9, EFN_synonyms_pow10, EFN_synonyms_pow11, EFN_synonyms_pow12,
+                      EFN_synonyms_pow13, EFN_synonyms_pow14, EFN_synonyms_pow15, EFN_synonyms_pow16,
+                      EFN_synonyms_pow17,EFN_synonyms_pow18, EFN_synonyms_pow19, EFN_synonyms_pow20)
+
+saveRDS(EFN_synonyms_pow, "data/temp_EFN_synonyms_pow.RData")
+
+EFN_syn <- do.call(rbind, EFN_synonyms_pow)
+EFN_syn$matched_name <- gsub('[^-[:^punct:]]', '', (gsub('[[:digit:]]+', '', row.names(EFN_syn))), perl=TRUE)
+EFN_syn <- subset(EFN_syn, rank == "SPECIES") #Keep on species (not varieties)
+colnames(EFN_syn)[2] <- "synonym" #Fix column name
+
+EFN_syn$EFN <- 1 #Add trait
+EFN_syn <- subset(EFN_syn, !is.na(synonym))
+colnames(EFN_syn)[[2]] <- "Phy" #Fix column name
+```
+
+Add synonyms to EFN dataset
+```{r}
+EFN <- rbind(EFN[, c("EFN", "Phy", "matched_name")], EFN_syn[, c("EFN", "Phy","matched_name")]) #Merge
+EFN$Phy <- trimws(EFN$Phy) #Trim white space from taxonomic names
+
+write.csv(EFN, file="data/efn_resolved_full.csv", row.names=FALSE)
+```
+

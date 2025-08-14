@@ -1,0 +1,669 @@
+---
+title: "Island-Mainland Pairing and Trait Data Cross-Correlation"
+output: html_notebook
+---
+# Notebook setup
+```{r setup, include=FALSE}
+# Set the working directory
+knitr::opts_knit$set(root.dir = "C:/Users/wande/Documents/EEB498_R/island_ldg")
+```
+
+# Dependencies setup
+```{r}
+library(tidyverse)
+packageVersion("tidyverse") # ‘2.0.0’
+library(stringr)
+packageVersion("stringr") # ‘1.5.1’
+library(RANN)
+packageVersion("RANN") # ‘2.6.2’
+library(sf)
+packageVersion("sf") # ‘1.0.17’
+library(geodist)
+packageVersion("geodist") # ‘0.1.0’
+library(geosphere)
+packageVersion("geosphere") # ‘1.5.20’
+```
+# Define Functions
+```{r}
+# Function to calculate UTM zone based on longitude
+get_utm_zone <- function(longitude) {
+  zone <- floor((longitude + 180) / 6) + 1
+  return(zone)
+}
+```
+# Ant Data: Islands
+Load in ant data and get unique islands
+data too big to upload, reference:
+
+
+Liu, C., Economo, E. P., & Guénard, B. (2023). GABI‐I: The global ant biodiversity informatics‐island database. Ecology (Durham), 104(4), e3969-n/a. https://doi.org/10.1002/ecy.3969
+
+```{r}
+antislands <- read.csv("data/GABI-I.csv", header = TRUE) %>% 
+  mutate(latlong = paste(Lat, Long, sep = ",")) %>% 
+  distinct(latlong, .keep_all = TRUE) %>%
+  dplyr::select(c("Island.Name", "latlong")) %>% 
+  separate(col = latlong, into = c("lat", "long"), sep=",")
+
+antislands$lat <- as.numeric(antislands$lat)
+antislands$long <- as.numeric(antislands$long)
+
+# set UTM zone for each lat/long combination
+antislands$utm_zone <- sapply(antislands$long, get_utm_zone)
+
+# handle northern vs. southern hemisphere
+sf_points <- st_as_sf(antislands, coords = c("long", "lat"), crs = 4326)
+```
+
+#Plant Data: Islands
+
+Load GIFT data from Delavaux, C. S., T. W. Crowther, J. D. Bever, P. Weigelt, and E. M. Gora. 2024. Mutualisms weaken the latitudinal diversity gradient among oceanic islands. Nature (London) 627:335-339.
+
+Link in the extended geological data to determine oceanic/non-oceanic islands
+```{r}
+load("data/GIFT_LatGrad_extended.RData")
+species.dat <- checklists
+geo.dat <- readRDS("data/geo.dat.extended_foranalyses.rds")
+load("GIFT_UniqueEntities.RData")
+```
+
+bring in species dat
+
+```{r}
+species.geo <- species.dat[[1]] %>% as.data.frame() %>%
+  dplyr::select(c('entity_ID', 'entity_class')) %>%
+  mutate_at(c('entity_class'), as.character) %>%
+  mutate_at(c('entity_ID'), as.integer) 
+
+geo <- geo.dat %>% 
+  rename(GDP_satellite = "mean_GDP_satellite", CHELSA_annual_Prec = "mean_wc2.0_bio_30s_12", CHELSA_annual_mean_Temp = "mean_wc2.0_bio_30s_01", 
+         Popdensity = "mean_gpw-v4_popdensity_UN_2015", Human_Footprint = "mean_HFP2009_unproj", Human_Influence = "mean_hii_v2geo", 
+         elev_range = "range", age_Ma = "age_MA") %>%
+  dplyr::select(c('entity_ID', 'geo_entity', 'area','longitude','latitude', 'biome','dist', 'CHELSA_annual_mean_Temp', 'CHELSA_annual_Prec',
+           'GDP_satellite', 'Popdensity', 'Human_Footprint', 'Human_Influence', 'elev_range', 'geology', 'age_Ma')) %>%
+  mutate_at(c('area','longitude','latitude', 'dist','CHELSA_annual_mean_Temp', 'CHELSA_annual_Prec',
+              'GDP_satellite', 'Popdensity','Human_Footprint', 'Human_Influence', 'elev_range', 'age_Ma'), as.numeric) %>%
+  mutate_at(c('geo_entity','biome','geology'), as.character) %>%
+  mutate_at(c('entity_ID'), as.integer) %>%
+  left_join(species.geo, by = "entity_ID") %>%
+  distinct(entity_ID, .keep_all = TRUE) %>%
+  mutate(entity_class = case_when(entity_class == "Island" ~ "Island",
+                                  entity_class == "Island Part" ~ "Island",          
+                                  entity_class == "Island Group" ~ "Island",
+                                  entity_class == "Mainland" ~ "Mainland",
+                                  entity_class == "Island/Mainland" ~ "undetermined")) %>%
+  mutate(geology = case_when(geology == "atoll" ~ "dev", 
+                             geology == "floor" ~ "dev", 
+                             geology == "floor/volcanic" ~ "dev",
+                             geology == "volcanic" ~ "dev",
+                             geology == "shelf" ~ "nondev",
+                             geology == "fragment" ~ "nondev",
+                             geology == "atoll/shelf/volcanic" ~ "nondev",
+                             geology == "fragment/shelf/volcanic" ~ "nondev")) %>% 
+  mutate(entity_class2 = case_when(geology == "dev" ~ "Oceanic",                      
+                                   geology == "nondev" ~ "Non-oceanic",
+                                   entity_class =="Mainland" ~ "Mainland"))
+```
+
+take the oceanic islands and get lat/long as separate fields
+ 
+```{r}
+islands <- geo %>% 
+  filter(entity_class == "Island") %>% 
+  filter(entity_class2 == "Oceanic") %>% 
+  mutate(latlong = paste(latitude, longitude, sep=",")) %>% 
+  distinct(entity_ID, latlong) %>% 
+  separate(col = latlong, into = c("lat", "long"), sep = ",")
+
+islands$lat <- as.numeric(islands$lat)
+islands$long <- as.numeric(islands$long)
+
+head(islands) #323 Oceanic islands
+```
+#Island cross-match
+Coordinates for islands in ant dataset and plant dataset do not always match exactly.  Use great circle distances and nearest neighbour to find islands that likely correspond to each other within the two datasets.  
+```{r}
+
+# Check for NA or invalid values in the coordinate columns
+sum(is.na(islands$lat) | is.na(islands$long))  # Count NA values in islands
+sum(is.na(antislands$lat) | is.na(antislands$long))  # Count NA values in antislands
+
+# Remove rows with NA or invalid values in both data frames
+islands_clean <- islands[!is.na(islands$lat) & !is.na(islands$long), ]
+antislands_clean <- antislands[!is.na(antislands$lat) & !is.na(antislands$long), ]
+
+# Calculate the distances between all pairs of points
+dist_matrix <- geodist(
+  x = antislands_clean[, c("long", "lat")],
+  y = islands_clean[, c("long", "lat")],
+  measure = "haversine" # Great-circle distance
+)
+
+# Find the nearest neighbors (minimum distance for each query point)
+nn_indices <- apply(dist_matrix, 1, which.min)
+nn_distances <- apply(dist_matrix, 1, min)
+
+antislands_clean$nearest_neighbour_entity_ID <- islands_clean$entity_ID[nn_indices]
+antislands_clean$distance <- nn_distances
+
+antislands_clean <- antislands_clean %>% 
+  left_join(islands_clean, by=c("nearest_neighbour_entity_ID" = "entity_ID"))
+
+head(antislands_clean) # 2654 ant-islands
+```
+Now, we have all the islands from the GABI-I database with their nearest neighbour oceanic island from the GIFT database.  Filter by the distance between them to determine candidate island-island pairs.  
+```{r}
+island_pairs <- antislands_clean %>% 
+  filter(distance < 1000) %>% 
+  mutate(nn_final = nearest_neighbour_entity_ID) # only 200 islands paired based on distance
+```
+Check for case where more than one island from GABI-I has been paired with the same island in GIFT
+Decide the ties based on distance between the islands.  
+```{r}
+island_pairs_duplicates <- island_pairs %>% 
+  group_by(nearest_neighbour_entity_ID) %>% 
+  filter(n() > 1) %>% 
+  ungroup()
+
+island_pairs_duplicates_names <- island_pairs %>% 
+  group_by(Island.Name) %>% 
+  filter(n() > 1) %>% 
+  ungroup()
+
+# decide duplicates by shortest distance
+island_pairs <- island_pairs %>% 
+  group_by(nearest_neighbour_entity_ID) %>% 
+  mutate(
+    nn_final = case_when(
+      n() > 1 & distance == min(distance) ~ nn_final,
+      n() > 1 & distance != min(distance) ~ NA,
+      n() <= 1 ~ nn_final
+    )
+  ) %>% 
+  ungroup() %>% 
+  drop_na()
+
+# drop columns for lat and long from GABI-I, use those from GIFT
+island_pairs <- island_pairs %>% 
+ dplyr::select(-c(lat.x, long.x)) %>% 
+  rename(entity_ID.i = nearest_neighbour_entity_ID) %>% 
+  rename(lat = lat.y) %>% 
+  rename(long = long.y)
+
+antisland_entity_ids <- unique(island_pairs$entity_ID.i)
+```
+
+Unique IDs of islands in GABI-I is the island name, in GIFT is the entity_id
+
+#Mainland-Island Pairings - Plants
+
+Next, pair each of these islands with its most likely source mainland based on Konig et al. (2020) in Ecography
+König, C., Weigelt, P., Taylor, A., Stein, A., Dawson, W., Essl, F., Pergl, J., Pyšek, P., Van Kleunen, M., & Winter, M. (2021). Source pools and disharmony of the world's island floras. Ecography, 44(1), 44-55. 
+See https://datadryad.org/dataset/doi:10.5061/dryad.6wwpzgmwm
+run file 1_Construction/source_pool_estimation.R
+
+```{r}
+toppairs <- readRDS("data/konig/final_predicted_mainland_island_pairs.Rds") %>% 
+  mutate(mainland_pred = as.numeric(mainland_pred))
+```
+
+
+```{r}
+mainlands <- geo %>% 
+  filter(entity_class == "Mainland") %>% 
+  filter(entity_ID != 11110) %>% # Problem with mainland that has no species remaining after GBIF filtering
+  mutate(latlong = paste(latitude, longitude, sep=",")) %>% 
+  distinct(entity_ID, latlong) %>% 
+  separate(col = latlong, into = c("lat", "long"), sep = ",")
+
+mainlands$lat <- as.numeric(mainlands$lat)
+mainlands$long <- as.numeric(mainlands$long)
+
+sf_points <- st_as_sf(mainlands, coords = c("long", "lat"), crs = 4326)
+
+mainlands <- mainlands %>% 
+  mutate(entity_ID.ml = entity_ID)
+
+head(mainlands)
+```
+Construct the lookup table with each island and its 5 closest-matching source mainlands
+along with mean mainland-island distance. 
+
+```{r}
+top1pairs <- toppairs %>% 
+  filter(rank == 1) %>% 
+  dplyr::select(c('island', 'mainland_pred', 'dist.x', 'latitude.y', 'longitude.y', 'area.y', 
+                  'elev.y', 'T_mean.y', 'P_mean.y', 'entity_class.y')) %>% 
+  rename(entity_ID.ml1 = mainland_pred,
+         distance.ml1 = dist.x,
+         latitude.ml1 = latitude.y,
+         longitude.ml1 = longitude.y,
+         area.ml1 = area.y,
+         elev_range.ml1 = elev.y,
+         annual_temp.ml1 = T_mean.y,
+         annual_precip.ml1 = P_mean.y,
+         entity_class.ml1 = entity_class.y,
+         entity_class2.ml1 = entity_class.y)
+
+top2pairs <- toppairs %>% 
+  filter(rank == 2) %>% 
+  dplyr::select(c('island', 'mainland_pred', 'dist.x', 'latitude.y', 'longitude.y', 'area.y', 
+                  'elev.y', 'T_mean.y', 'P_mean.y', 'entity_class.y')) %>% 
+  rename(entity_ID.ml2 = mainland_pred,
+         distance.ml2 = dist.x,
+         latitude.ml2 = latitude.y,
+         longitude.ml2 = longitude.y,
+         area.ml2 = area.y,
+         elev_range.ml2 = elev.y,
+         annual_temp.ml2 = T_mean.y,
+         annual_precip.ml2 = P_mean.y,
+         entity_class.ml2 = entity_class.y,
+         entity_class2.ml2 = entity_class.y)
+
+top3pairs <- toppairs %>% 
+  filter(rank == 3) %>% 
+  dplyr::select(c('island', 'mainland_pred', 'dist.x', 'latitude.y', 'longitude.y', 'area.y', 
+                  'elev.y', 'T_mean.y', 'P_mean.y', 'entity_class.y')) %>% 
+  rename(entity_ID.ml3 = mainland_pred,
+         distance.ml3 = dist.x,
+         latitude.ml3 = latitude.y,
+         longitude.ml3 = longitude.y,
+         area.ml3 = area.y,
+         elev_range.ml3 = elev.y,
+         annual_temp.ml3 = T_mean.y,
+         annual_precip.ml3 = P_mean.y,
+         entity_class.ml3 = entity_class.y,
+         entity_class2.ml3 = entity_class.y)
+
+top4pairs <- toppairs %>% 
+  filter(rank == 4) %>% 
+  dplyr::select(c('island', 'mainland_pred', 'dist.x', 'latitude.y', 'longitude.y', 'area.y', 
+                  'elev.y', 'T_mean.y', 'P_mean.y', 'entity_class.y')) %>% 
+  rename(entity_ID.ml4 = mainland_pred,
+         distance.ml4 = dist.x,
+         latitude.ml4 = latitude.y,
+         longitude.ml4 = longitude.y,
+         area.ml4 = area.y,
+         elev_range.ml4 = elev.y,
+         annual_temp.ml4 = T_mean.y,
+         annual_precip.ml4 = P_mean.y,
+         entity_class.ml4 = entity_class.y,
+         entity_class2.ml4 = entity_class.y)
+
+top5pairs <- toppairs %>% 
+  filter(rank == 5) %>% 
+  dplyr::select(c('island', 'mainland_pred', 'dist.x', 'latitude.y', 'longitude.y', 'area.y', 
+                  'elev.y', 'T_mean.y', 'P_mean.y', 'entity_class.y')) %>% 
+  rename(entity_ID.ml5 = mainland_pred,
+         distance.ml5 = dist.x,
+         latitude.ml5 = latitude.y,
+         longitude.ml5 = longitude.y,
+         area.ml5 = area.y,
+         elev_range.ml5 = elev.y,
+         annual_temp.ml5 = T_mean.y,
+         annual_precip.ml5 = P_mean.y,
+         entity_class.ml5 = entity_class.y,
+         entity_class2.ml5 = entity_class.y)
+
+island_mainland_pairs <- top1pairs %>% 
+  left_join(top2pairs, by = c("island")) %>% 
+  left_join(top3pairs, by = c("island")) %>% 
+  left_join(top4pairs, by = c("island")) %>% 
+  left_join(top5pairs, by = c("island")) %>% 
+  rowwise() %>% 
+  mutate(mainlands = list(c_across(starts_with("entity_ID.ml")))) %>% 
+  mutate(mean_dist = mean(c_across(starts_with("distance.ml")))) %>% 
+  mutate(mean_latitude.ml = mean(c_across(starts_with("latitude.ml")))) %>% 
+  ungroup() %>% 
+  left_join(geo, by = c("island" = "entity_ID")) %>%  
+  rename(entity_ID.i = island,
+         latitude.i = latitude,
+         longitude.i = longitude,
+         dist.i = dist,
+         area.i = area,
+         elev_range.i = elev_range,
+         annual_temp.i = CHELSA_annual_mean_Temp,
+         annual_precip.i = CHELSA_annual_Prec,
+         entity_class.i = entity_class,
+         entity_class2.i = entity_class2)
+
+
+island_mainland_pairs$pairID <- seq.int(nrow(island_mainland_pairs))
+names(island_mainland_pairs)
+
+# check for islands that have been paired to a mainland with no checklist
+referenced_mainlands <- unique(unlist(island_mainland_pairs$mainlands, use.names = FALSE))
+
+unmatched_referenced_mainlands = as.numeric(setdiff(referenced_mainlands, geo.dat$entity_ID)) # 10139, 10141
+
+# remove pairs with no checklist
+island_mainland_pairs <- island_mainland_pairs %>% 
+  rowwise() %>% 
+  filter(!(any(c_across(starts_with("entity_ID.ml")) %in% unmatched_referenced_mainlands))) %>% 
+  ungroup()
+
+# bind island names to the lookup table in order to be able to join with ant data
+geonames <- geo %>% 
+ dplyr::select(c(entity_ID, geo_entity))
+
+antisland_names <- island_pairs %>% 
+  dplyr::select(c('Island.Name', 'entity_ID.i'))
+
+island_mainland_pairs <- island_mainland_pairs %>% 
+  left_join(antisland_names, by = c('entity_ID.i'))
+
+saveRDS(island_mainland_pairs, "data/island_mainland_pairs_with_antisland_names.RDS")
+```
+#Mainland-Island Pairings - Ants
+
+Next, pair each of these islands with its most likely source mainland based on Konig et al. (2020) in Ecography
+König, C., Weigelt, P., Taylor, A., Stein, A., Dawson, W., Essl, F., Pergl, J., Pyšek, P., Van Kleunen, M., & Winter, M. (2021). Source pools and disharmony of the world's island floras. Ecography, 44(1), 44-55. 
+See https://datadryad.org/dataset/doi:10.5061/dryad.6wwpzgmwm
+run file 1_Construction/source_pool_estimation_ants.R
+
+Construct the lookup table with each island and its 5 closest-matching source mainlands
+along with mean mainland-island distance.
+
+```{r}
+load("data/konig/pairs_pred_ants.RData")
+toppairs.ants <- pairs_pred %>% 
+  rename(BENTITY2_N.ml = mainland_pred,
+         entityID.i = island,
+         latitude.i = latitude.x,
+         longitude.i = longitude.x,
+         area.i = area.x,
+         annual_temp.i = T_mean.x,
+         annual_precip.i = P_mean.x,
+         entity_class.i = entity_class.x,
+         longitude.ml = longitude.y,
+         latitude.ml = latitude.y,
+         area.ml = area.y,
+         annual_temp.ml = T_mean.y,
+         annual_precip.ml = P_mean.y)
+
+toppairs.ants$dist.ml <- mapply(
+  function(lat1, lon1, lat2, lon2) {
+    distHaversine(c(lon1, lat1), c(lon2, lat2)) / 1000 # convert m to km
+  },
+  toppairs.ants$latitude.i, toppairs.ants$longitude.i, toppairs.ants$latitude.ml, toppairs.ants$longitude.ml
+)
+
+names(toppairs.ants)
+
+top1pairs.ants <- toppairs.ants %>% 
+  filter(rank == 1) %>% 
+  dplyr::select(c('BENTITY2_N.ml', 'entityID.i','dist.ml', 'entity_class.i', 'latitude.i', 'longitude.i',
+                  'area.i', 'annual_temp.i', 'annual_precip.i', 'latitude.ml', 'longitude.ml', 'area.ml',
+                  'annual_temp.ml', 'annual_precip.ml')) %>% 
+  rename_with(~ str_replace(., "\\.ml$", ".ml1"), ends_with(".ml"))
+
+top2pairs.ants <- toppairs.ants %>% 
+  filter(rank == 2) %>% 
+  dplyr::select(c('BENTITY2_N.ml', 'entityID.i','dist.ml', 'entity_class.i', 'latitude.i', 'longitude.i',
+                  'area.i', 'annual_temp.i', 'annual_precip.i', 'latitude.ml', 'longitude.ml', 'area.ml',
+                  'annual_temp.ml', 'annual_precip.ml')) %>% 
+  rename_with(~ str_replace(., "\\.ml$", ".ml2"), ends_with(".ml"))
+
+top3pairs.ants <- toppairs.ants %>% 
+  filter(rank == 3) %>% 
+  dplyr::select(c('BENTITY2_N.ml', 'entityID.i','dist.ml', 'entity_class.i', 'latitude.i', 'longitude.i',
+                  'area.i', 'annual_temp.i', 'annual_precip.i', 'latitude.ml', 'longitude.ml', 'area.ml',
+                  'annual_temp.ml', 'annual_precip.ml')) %>% 
+  rename_with(~ str_replace(., "\\.ml$", ".ml3"), ends_with(".ml"))
+
+top4pairs.ants <- toppairs.ants %>% 
+  filter(rank == 4) %>% 
+  dplyr::select(c('BENTITY2_N.ml', 'entityID.i','dist.ml', 'entity_class.i', 'latitude.i', 'longitude.i',
+                  'area.i', 'annual_temp.i', 'annual_precip.i', 'latitude.ml', 'longitude.ml', 'area.ml',
+                  'annual_temp.ml', 'annual_precip.ml')) %>% 
+  rename_with(~ str_replace(., "\\.ml$", ".ml4"), ends_with(".ml"))
+
+top5pairs.ants <- toppairs.ants %>% 
+  filter(rank == 5) %>% 
+  dplyr::select(c('BENTITY2_N.ml', 'entityID.i','dist.ml', 'entity_class.i', 'latitude.i', 'longitude.i',
+                  'area.i', 'annual_temp.i', 'annual_precip.i', 'latitude.ml', 'longitude.ml', 'area.ml',
+                  'annual_temp.ml', 'annual_precip.ml')) %>% 
+  rename_with(~ str_replace(., "\\.ml$", ".ml5"), ends_with("ml"))
+
+island_mainland_pairs.ants <- top1pairs.ants %>% 
+  left_join(top2pairs.ants, by = c("entityID.i")) %>% 
+  left_join(top3pairs.ants, by = c("entityID.i")) %>% 
+  left_join(top4pairs.ants, by = c("entityID.i")) %>% 
+  left_join(top5pairs.ants, by = c("entityID.i")) %>% 
+  rowwise() %>% 
+  mutate(mainlands = list(c_across(starts_with("BENTITY2_N.ml")))) %>% 
+  mutate(mean_dist = mean(c_across(starts_with("dist.ml")))) %>% 
+  mutate(mean_latitude.ml = mean(c_across(starts_with("latitude.ml")))) %>% 
+  ungroup()
+
+island_mainland_pairs.ants <- island_mainland_pairs.ants %>% #remove duplicated columns from join
+  select(-matches("(x|y).?$"))
+
+# add pairID
+island_mainland_pairs.ants$pairID <- seq.int(nrow(island_mainland_pairs.ants))
+
+saveRDS(island_mainland_pairs.ants, "data/island_mainland_pairs_ants.RDS")
+```
+
+#Plant Trait Data: All Regions
+Binding EFN presence/absence trait data to GIFT database
+bring in EFN species data
+to construct data/efn_resolved_full.csv, run 1_Construction/EFNs_taxize.Rmd
+
+```{r}
+efndat <- read.csv("data/efn_resolved_full.csv", header = TRUE) %>% 
+  rename(species = matched_name) %>% 
+  mutate("species" = ifelse(is.na(species), Phy, species)) %>% 
+ dplyr::select("EFN", "species")
+```
+ with species checklist data, keep native, assign EFN using species, fill 0 if no info is available
+ join with geo data and keep unique sp by loc (entity_ID)
+ 
+```{r}
+occurrences <- readRDS("data/species_export_GBIF_filtered.RDS")
+
+occurrences <- occurrences %>% 
+ dplyr::select(c("species", "occ_count"))
+
+efndat <- efndat %>% 
+  distinct(species, .keep_all = TRUE)
+
+species <- species.dat[[2]] %>% as.data.frame() %>% 
+  mutate(species = paste(genus, species_epithet, sep = " ")) %>% 
+ dplyr::select(c("entity_ID", "family", "native", "naturalized", "species", "name_ID", "genus")) %>%
+  mutate_at(c('family', 'species', 'name_ID', 'genus'), as.character) %>%
+  mutate_at(c('native', 'naturalized'), as.numeric) %>%
+  mutate_at(c('entity_ID'), as.integer) %>%
+ dplyr::select(-c("native", "naturalized")) %>%
+  left_join(efndat, by = c("species")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN)) %>% 
+  left_join(occurrences, by = c("species")) %>% 
+  filter(occ_count >= 100) %>% 
+  drop_na(EFN) %>%
+  left_join(geo, by = "entity_ID") %>%                                          
+  group_by(entity_ID) %>% 
+  distinct(species, .keep_all = TRUE) %>%             
+  ungroup()  
+```
+
+SP RICHNESS EFN PRESENCE
+ Pool species from 5 source mainlands for each island and count
+ 
+```{r}
+sprich.pairwise <- island_mainland_pairs %>% 
+  rowwise() %>% 
+  mutate(
+    efn.pres.ml = list(
+      species %>% 
+        filter(entity_ID %in% mainlands & EFN == 1) %>% 
+        pull(species) %>% 
+        unique() %>% 
+        length()
+    ),
+    efn.abs.ml = list(
+      species %>% 
+        filter(entity_ID %in% mainlands & EFN == 0) %>% 
+        pull(species) %>% 
+        unique() %>% 
+        length()
+    ),
+    efn.pres.i = list(
+      species %>% 
+        filter(entity_ID == entity_ID.i & EFN == 1) %>% 
+        pull(species) %>% 
+        length()
+    ),
+    efn.abs.i = list(
+      species %>% 
+        filter(entity_ID == entity_ID.i & EFN == 0) %>% 
+        pull(species) %>% 
+        length()
+    ),
+    sprich.plant.ml = list(
+      species %>% 
+        filter(entity_ID %in% mainlands) %>% 
+        pull(species) %>% 
+        unique() %>% 
+        length()
+    ),
+    sprich.plant.i = list(
+      species %>% 
+        filter(entity_ID == entity_ID.i) %>% 
+        pull(species) %>% 
+        length()
+    )
+  ) %>% 
+  ungroup() 
+```
+ 
+ SAVE DATA
+```{r}
+saveRDS(sprich.pairwise, "data/GIFT_EFN_trait_data.RDS")
+```
+#Ant Trait Data: All Regions
+Binding EFN-visiting trait data to ant islands and mainlands
+Filter out species with < 100 GBIF occurrences
+```{r}
+antislands <- read.csv("data/GABI-I.csv", header = TRUE) %>% 
+  mutate(
+    Taxon.code2 = str_replace_all(Taxon.code, "\\.", " ") # replace . with space for left join
+  )
+
+efn.trait <- read.csv("data/Species_EFN_Data.csv", header = TRUE)
+
+antislands <- antislands %>% 
+  left_join(efn.trait, by = c("Taxon.code2" = "Name")) %>% 
+  distinct(Island.Name, Taxon.code2, .keep_all = TRUE)
+
+ant.occ <- readRDS("data/ant_i_species_export_GBIF_filtered.RDS")
+
+antislands <- antislands %>% 
+  left_join(ant.occ, by = c("Taxon.code2")) %>% 
+  filter(occ_count >= 100)
+
+# filter for only GABI-I islands that correspond to GIFT oceanic islands
+giftantsislands <- island_pairs %>% 
+  left_join(antislands, by = c("Island.Name")) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN))
+
+```
+Load in GABI from 
+Nathan, P., E. P. Economo, B. Guénard, A. K. Simonsen, and M. E. Frederickson. 2023. Generalized mutualisms promote range expansion in both plant and ant partners. Proceedings of the Royal Society B: Biological Sciences 290:20231083.
+https://datadryad.org/stash/dataset/doi:10.5061/dryad.jm63xsjh6
+```{r}
+rawGABI <- read.csv("GABI_shapefiles/GABI_Data_Release1.0_18012020.csv")
+head(rawGABI)
+
+geo_entity.ml <- toppairs.ants %>% 
+  select(BENTITY2_N.ml) %>% 
+  distinct(BENTITY2_N.ml, .keep_all = TRUE)
+
+GABImainlands <- geo_entity.ml %>% 
+  left_join(rawGABI, by = c("BENTITY2_N.ml" = "bentity2_name"))
+```
+
+Join ant records to EFN visit trait data
+Make sure there is only one record per Mainland per species
+Filter out species with < 100 GBIF occurrences
+IF EFN trait is NA switch to 0
+
+```{r}
+efn.trait <- read.csv("data/Species_EFN_Data.csv", header = TRUE)
+ant.occ.ml <- readRDS("data/ant_species_export_GBIF_filtered.RDS")
+
+GABImainlands <- GABImainlands %>% 
+  mutate(
+    Taxon.code2 = str_replace_all(valid_species_name, "\\.", " ") # replace . with space for left join
+  ) %>% 
+  left_join(efn.trait, by = c("Taxon.code2" = "Name")) %>% 
+  left_join(ant.occ.ml, by = c("Taxon.code2")) %>% 
+  filter(occ_count >= 100) %>% 
+  distinct(BENTITY2_N.ml, Taxon.code2, .keep_all = TRUE) %>% 
+  mutate(EFN = ifelse(is.na(EFN), 0, EFN))
+```
+
+species richness by EFN visitor / non-visitor 
+ Pool species from 5 source mainlands for each island and count
+
+```{r}
+sprich.pairwise.ants <- island_mainland_pairs.ants %>% 
+  rowwise() %>% 
+  mutate(
+    efn.visitor.ml = list(
+      GABImainlands %>% 
+        filter(BENTITY2_N.ml %in% mainlands & EFN == 1) %>% 
+        pull(Taxon.code2) %>% 
+        unique() %>% 
+        length()
+    ),
+    efn.nonvisitor.ml = list(
+      GABImainlands %>% 
+        filter(BENTITY2_N.ml %in% mainlands & EFN == 0) %>% 
+        pull(Taxon.code2) %>% 
+        unique() %>% 
+        length()
+    ),
+    efn.visitor.i = {
+      id_i <- entityID.i
+      giftantsislands %>% 
+        filter(entity_ID.i == id_i & EFN == 1) %>% 
+        pull(Taxon.code2) %>% 
+        length()
+    },
+    efn.nonvisitor.i = {
+      id_i <- entityID.i
+      giftantsislands %>% 
+        filter(entity_ID.i == id_i & EFN == 0) %>% 
+        pull(Taxon.code2) %>% 
+        length()
+    },
+    sprich.ant.ml = list(
+      GABImainlands %>% 
+        filter(BENTITY2_N.ml %in% mainlands) %>% 
+        pull(Taxon.code2) %>% 
+        unique() %>% 
+        length()
+    ),
+    sprich.ant.i = {
+      id_i <- entityID.i
+      giftantsislands %>% 
+        filter(entity_ID.i == id_i) %>% 
+        pull(Taxon.code2) %>% 
+        length()
+    }
+  ) %>% 
+  ungroup()
+
+saveRDS(sprich.pairwise.ants, "data/GABI_efn_trait_data.RDS")
+```
+DEBUGGING
+```{r}
+island_entity_ids_plant <- island_mainland_pairs %>% 
+  pull(entity_ID.i)
+
+island_entity_ids_ant <- island_mainland_pairs.ants %>% 
+  pull(entityID.i)
+
+entity_overlap <- intersect(island_entity_ids_plant, island_entity_ids_ant)
+```
+
